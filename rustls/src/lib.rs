@@ -359,6 +359,7 @@ mod builder;
 mod enums;
 mod key_log;
 mod key_log_file;
+pub mod low_level;
 mod suites;
 mod ticketer;
 mod versions;
@@ -438,7 +439,7 @@ pub mod client {
     mod client_conn;
     mod common;
     pub(super) mod handy;
-    mod hs;
+    pub(super) mod hs;
     #[cfg(feature = "tls12")]
     mod tls12;
     mod tls13;
