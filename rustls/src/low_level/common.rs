@@ -6,8 +6,11 @@ use alloc::vec;
 use alloc::vec::Vec;
 use std::sync::Arc;
 
+use crate::internal::record_layer::RecordLayer;
+use crate::msgs::deframer::MessageDeframer;
 use crate::msgs::enums::ECPointFormat;
 use crate::msgs::handshake::{CertificateStatusRequest, ClientExtension};
+use crate::InvalidMessage;
 use crate::{
     msgs::{
         enums::Compression,
@@ -46,7 +49,7 @@ impl LlConnectionCommon {
     /// Processes TLS records in the `incoming_tls` buffer
     pub fn process_tls_records<'c, 'i>(
         &'c mut self,
-        _incoming_tls: &'i mut [u8],
+        incoming_tls: &'i mut [u8],
     ) -> Result<Status<'c, 'i>, Error> {
         match self.state {
             CommonState::StartHandshake => Ok(Status {
@@ -57,7 +60,43 @@ impl LlConnectionCommon {
                 discard: 0,
                 state: State::MustTransmitTlsData(MustTransmitTlsData { conn: self }),
             }),
-            CommonState::WaitServerHello => panic!("waiting for server hello"),
+            CommonState::WaitServerHello => {
+                if incoming_tls.iter().all(|&b| b == 0) {
+                    Ok(Status {
+                        discard: 0,
+                        state: State::NeedsMoreTlsData { num_bytes: None },
+                    })
+                } else {
+                    let mut record_layer = RecordLayer::new();
+                    let mut deframer = MessageDeframer::default();
+                    deframer
+                        .read(&mut incoming_tls.as_ref())
+                        .unwrap();
+
+                    let msg = Message::try_from(
+                        deframer
+                            .pop(&mut record_layer, None)
+                            .unwrap()
+                            .unwrap()
+                            .message,
+                    )
+                    .unwrap();
+
+                    match msg.payload {
+                        MessagePayload::Handshake {
+                            parsed:
+                                HandshakeMessagePayload {
+                                    typ: HandshakeType::ServerHello,
+                                    payload: HandshakePayload::ServerHello(payload),
+                                },
+                            ..
+                        } => todo!("Received ServerHello: {:?}", payload),
+                        _ => Err(Error::InvalidMessage(InvalidMessage::UnexpectedMessage(
+                            "expected server hello",
+                        ))),
+                    }
+                }
+            }
         }
     }
 
