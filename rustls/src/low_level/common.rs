@@ -6,8 +6,8 @@ use alloc::vec;
 use alloc::vec::Vec;
 use std::sync::Arc;
 
-use crate::internal::record_layer::RecordLayer;
-use crate::msgs::deframer::MessageDeframer;
+use crate::crypto::cipher::OpaqueMessage;
+use crate::msgs::codec::Reader;
 use crate::msgs::enums::ECPointFormat;
 use crate::msgs::handshake::{CertificateStatusRequest, ClientExtension};
 use crate::InvalidMessage;
@@ -28,6 +28,7 @@ enum CommonState {
     StartHandshake,
     SendClientHello,
     WaitServerHello,
+    WaitCert { offset: usize },
 }
 
 /// both `LlClientConnection` and `LlServerConnection` implement `DerefMut<Target = LlConnectionCommon>`
@@ -51,49 +52,93 @@ impl LlConnectionCommon {
         &'c mut self,
         incoming_tls: &'i mut [u8],
     ) -> Result<Status<'c, 'i>, Error> {
-        match self.state {
-            CommonState::StartHandshake => Ok(Status {
-                discard: 0,
-                state: State::MustEncryptTlsData(MustEncryptTlsData { conn: self }),
-            }),
-            CommonState::SendClientHello => Ok(Status {
-                discard: 0,
-                state: State::MustTransmitTlsData(MustTransmitTlsData { conn: self }),
-            }),
-            CommonState::WaitServerHello => {
-                if incoming_tls.iter().all(|&b| b == 0) {
-                    Ok(Status {
+        loop {
+            match std::dbg!(&self.state) {
+                CommonState::StartHandshake => {
+                    return Ok(Status {
                         discard: 0,
-                        state: State::NeedsMoreTlsData { num_bytes: None },
-                    })
-                } else {
-                    let mut record_layer = RecordLayer::new();
-                    let mut deframer = MessageDeframer::default();
-                    deframer
-                        .read(&mut incoming_tls.as_ref())
-                        .unwrap();
-
-                    let msg = Message::try_from(
-                        deframer
-                            .pop(&mut record_layer, None)
+                        state: State::MustEncryptTlsData(MustEncryptTlsData { conn: self }),
+                    });
+                }
+                CommonState::SendClientHello => {
+                    return Ok(Status {
+                        discard: 0,
+                        state: State::MustTransmitTlsData(MustTransmitTlsData { conn: self }),
+                    });
+                }
+                CommonState::WaitServerHello => {
+                    if incoming_tls.iter().all(|&b| b == 0) {
+                        return Ok(Status {
+                            discard: 0,
+                            state: State::NeedsMoreTlsData { num_bytes: None },
+                        });
+                    } else {
+                        let mut reader = Reader::init(incoming_tls);
+                        let m = OpaqueMessage::read(&mut reader)
                             .unwrap()
-                            .unwrap()
-                            .message,
-                    )
-                    .unwrap();
+                            .into_plain_message();
+                        let read_bytes = reader.used();
 
-                    match msg.payload {
-                        MessagePayload::Handshake {
-                            parsed:
-                                HandshakeMessagePayload {
-                                    typ: HandshakeType::ServerHello,
-                                    payload: HandshakePayload::ServerHello(payload),
-                                },
-                            ..
-                        } => todo!("Received ServerHello: {:?}", payload),
-                        _ => Err(Error::InvalidMessage(InvalidMessage::UnexpectedMessage(
-                            "expected server hello",
-                        ))),
+                        let msg = Message::try_from(m).unwrap();
+
+                        match msg.payload {
+                            MessagePayload::Handshake {
+                                parsed:
+                                    HandshakeMessagePayload {
+                                        typ: HandshakeType::ServerHello,
+                                        payload: HandshakePayload::ServerHello(payload),
+                                    },
+                                ..
+                            } => {
+                                std::println!("Received ServerHello: {:?}", payload);
+
+                                self.state = CommonState::WaitCert { offset: read_bytes };
+                            }
+                            _ => {
+                                return Err(Error::InvalidMessage(
+                                    InvalidMessage::UnexpectedMessage("expected server hello"),
+                                ));
+                            }
+                        }
+                    }
+                }
+                &CommonState::WaitCert { offset } => {
+                    if incoming_tls[offset..]
+                        .iter()
+                        .all(|&b| b == 0)
+                    {
+                        self.state = CommonState::WaitCert { offset: 0 };
+                        return Ok(Status {
+                            discard: offset,
+                            state: State::NeedsMoreTlsData { num_bytes: None },
+                        });
+                    } else {
+                        let mut reader = Reader::init(&incoming_tls[offset..]);
+                        let m = OpaqueMessage::read(&mut reader)
+                            .unwrap()
+                            .into_plain_message();
+
+                        let msg = Message::try_from(m).unwrap();
+
+                        match msg.payload {
+                            MessagePayload::Handshake {
+                                parsed:
+                                    HandshakeMessagePayload {
+                                        typ: HandshakeType::Certificate,
+                                        payload: HandshakePayload::Certificate(payload),
+                                    },
+                                ..
+                            } => {
+                                panic!("Received Certificate: {:?}", payload);
+                            }
+                            _ => {
+                                return Err(Error::InvalidMessage(
+                                    InvalidMessage::UnexpectedMessage(
+                                        "expected certificate request",
+                                    ),
+                                ));
+                            }
+                        }
                     }
                 }
             }
