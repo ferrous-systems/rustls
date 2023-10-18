@@ -20,12 +20,18 @@ use crate::{
     ClientConfig, Error, HandshakeType, ProtocolVersion,
 };
 
+#[derive(Debug)]
+enum CommonState {
+    StartHandshake,
+    SendClientHello,
+    WaitServerHello,
+}
+
 /// both `LlClientConnection` and `LlServerConnection` implement `DerefMut<Target = LlConnectionCommon>`
 #[derive(Debug)]
 pub struct LlConnectionCommon {
     config: Arc<ClientConfig>,
-    must_send_hello: bool,
-    did_send_hello: bool,
+    state: CommonState,
 }
 
 impl LlConnectionCommon {
@@ -33,8 +39,7 @@ impl LlConnectionCommon {
     pub fn new(config: Arc<ClientConfig>) -> Self {
         Self {
             config,
-            must_send_hello: true,
-            did_send_hello: false,
+            state: CommonState::StartHandshake,
         }
     }
 
@@ -43,18 +48,16 @@ impl LlConnectionCommon {
         &'c mut self,
         _incoming_tls: &'i mut [u8],
     ) -> Result<Status<'c, 'i>, Error> {
-        if self.must_send_hello {
-            Ok(Status {
+        match self.state {
+            CommonState::StartHandshake => Ok(Status {
                 discard: 0,
                 state: State::MustEncryptTlsData(MustEncryptTlsData { conn: self }),
-            })
-        } else if self.did_send_hello {
-            panic!("Did send client hello")
-        } else {
-            Ok(Status {
+            }),
+            CommonState::SendClientHello => Ok(Status {
                 discard: 0,
                 state: State::MustTransmitTlsData(MustTransmitTlsData { conn: self }),
-            })
+            }),
+            CommonState::WaitServerHello => panic!("waiting for server hello"),
         }
     }
 
@@ -136,13 +139,13 @@ impl LlConnectionCommon {
             written_bytes += bytes.len();
         }
 
-        self.must_send_hello = false;
+        self.state = CommonState::SendClientHello;
 
         Ok(written_bytes)
     }
 
     fn tls_data_done(&mut self) {
-        self.did_send_hello = true;
+        self.state = CommonState::WaitServerHello;
     }
 
     fn encrypt_traffic_transit(
