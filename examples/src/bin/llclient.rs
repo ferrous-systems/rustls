@@ -26,7 +26,7 @@ fn main() -> io::Result<()> {
     let mut incoming_tls = [0; 16 * 1024];
     let mut incoming_used = 0;
 
-    let outgoing_tls = Vec::new();
+    let mut outgoing_tls = vec![0; 16 * 1024];
     let mut outgoing_used = 0;
 
     loop {
@@ -34,10 +34,16 @@ fn main() -> io::Result<()> {
             .process_tls_records(&mut incoming_tls)
             .unwrap();
 
-        match state {
+        dbg!(outgoing_used);
+        match dbg!(state) {
             // logic similar to the one presented in the 'handling InsufficientSizeError' section is
             // used in these states
-            State::MustEncryptTlsData(_) => { /* .. */ }
+            State::MustEncryptTlsData(mut state) => {
+                let n = state
+                    .encrypt(&mut outgoing_tls)
+                    .unwrap();
+                outgoing_used += n;
+            }
             State::MayEncryptAppData(_) => { /* .. */ }
 
             State::MustTransmitTlsData(state) => {

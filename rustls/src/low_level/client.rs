@@ -28,9 +28,9 @@ impl DerefMut for LlClientConnection {
 
 impl LlClientConnection {
     /// FIXME: docs
-    pub fn new(_config: Arc<ClientConfig>, _name: ServerName) -> Result<Self, Error> {
+    pub fn new(config: Arc<ClientConfig>, _name: ServerName) -> Result<Self, Error> {
         Ok(Self {
-            conn: LlConnectionCommon::new(),
+            conn: LlConnectionCommon::new(config),
         })
     }
 }

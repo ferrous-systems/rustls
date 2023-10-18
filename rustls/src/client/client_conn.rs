@@ -135,14 +135,14 @@ pub trait ResolvesClientCert: Send + Sync {
 /// [`RootCertStore`]: crate::RootCertStore
 pub struct ClientConfig {
     /// List of ciphersuites, in preference order.
-    pub(super) cipher_suites: Vec<SupportedCipherSuite>,
+    pub(crate) cipher_suites: Vec<SupportedCipherSuite>,
 
     /// List of supported key exchange algorithms, in preference order -- the
     /// first element is the highest priority.
     ///
     /// The first element in this list is the _default key share algorithm_,
     /// and in TLS1.3 a key share for it is sent in the client hello.
-    pub(super) kx_groups: Vec<&'static dyn SupportedKxGroup>,
+    pub(crate) kx_groups: Vec<&'static dyn SupportedKxGroup>,
 
     /// Source of randomness and other crypto.
     pub(super) provider: &'static dyn CryptoProvider,
@@ -181,7 +181,7 @@ pub struct ClientConfig {
     pub enable_sni: bool,
 
     /// How to verify the server certificate chain.
-    pub(super) verifier: Arc<dyn verify::ServerCertVerifier>,
+    pub(crate) verifier: Arc<dyn verify::ServerCertVerifier>,
 
     /// How to output key material for debugging.  The default
     /// does nothing.
