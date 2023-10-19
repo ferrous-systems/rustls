@@ -1,7 +1,8 @@
 use rustls::low_level::client::LlClientConnection;
 use rustls::low_level::common::{AppDataRecord, State, Status};
 use rustls::{ClientConfig, RootCertStore};
-use std::io::{self, Read, Write};
+use std::fs::File;
+use std::io::{self, BufReader, Read, Write};
 use std::sync::Arc;
 
 fn main() -> io::Result<()> {
@@ -12,6 +13,14 @@ fn main() -> io::Result<()> {
             .cloned(),
     );
 
+    {
+        let certfile = File::open("/home/christian/.local/share/mkcert/rootCA.pem")?;
+        let mut reader = BufReader::new(certfile);
+        root_store.add_parsable_certificates(
+            rustls_pemfile::certs(&mut reader).map(|result| result.unwrap()),
+        );
+    }
+
     let config = ClientConfig::builder()
         .with_safe_defaults()
         .with_root_certificates(root_store)
@@ -19,7 +28,7 @@ fn main() -> io::Result<()> {
 
     let mut sock = std::net::TcpStream::connect("[::]:1443")?;
     let mut conn =
-        LlClientConnection::new(Arc::new(config), "example.com".try_into().unwrap()).unwrap();
+        LlClientConnection::new(Arc::new(config), "localhost".try_into().unwrap()).unwrap();
 
     // .. configure / inititiaize `conn` and `sock`
 

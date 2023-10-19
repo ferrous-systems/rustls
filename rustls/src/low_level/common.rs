@@ -4,13 +4,13 @@ use core::num::NonZeroUsize;
 
 use alloc::vec;
 use alloc::vec::Vec;
+use pki_types::UnixTime;
 use std::sync::Arc;
 
 use crate::crypto::cipher::OpaqueMessage;
 use crate::msgs::codec::Reader;
 use crate::msgs::enums::ECPointFormat;
 use crate::msgs::handshake::{CertificateStatusRequest, ClientExtension};
-use crate::InvalidMessage;
 use crate::{
     msgs::{
         enums::Compression,
@@ -22,6 +22,7 @@ use crate::{
     },
     ClientConfig, Error, HandshakeType, ProtocolVersion,
 };
+use crate::{InvalidMessage, ServerName};
 
 #[derive(Debug)]
 enum CommonState {
@@ -29,20 +30,23 @@ enum CommonState {
     SendClientHello,
     WaitServerHello,
     WaitCert { offset: usize },
+    WaitServerKeyExchange { offset: usize },
 }
 
 /// both `LlClientConnection` and `LlServerConnection` implement `DerefMut<Target = LlConnectionCommon>`
 #[derive(Debug)]
 pub struct LlConnectionCommon {
     config: Arc<ClientConfig>,
+    name: ServerName,
     state: CommonState,
 }
 
 impl LlConnectionCommon {
     /// FIXME: docs
-    pub fn new(config: Arc<ClientConfig>) -> Self {
+    pub fn new(config: Arc<ClientConfig>, name: ServerName) -> Self {
         Self {
             config,
+            name,
             state: CommonState::StartHandshake,
         }
     }
@@ -129,7 +133,20 @@ impl LlConnectionCommon {
                                     },
                                 ..
                             } => {
-                                panic!("Received Certificate: {:?}", payload);
+                                self.config
+                                    .verifier
+                                    .verify_server_cert(
+                                        &payload[0],
+                                        &[],
+                                        &self.name,
+                                        &[],
+                                        UnixTime::now(),
+                                    )
+                                    .unwrap();
+
+                                self.state = CommonState::WaitServerKeyExchange {
+                                    offset: offset + reader.used(),
+                                };
                             }
                             _ => {
                                 return Err(Error::InvalidMessage(
@@ -140,6 +157,9 @@ impl LlConnectionCommon {
                             }
                         }
                     }
+                }
+                &CommonState::WaitServerKeyExchange { offset } => {
+                    todo!()
                 }
             }
         }
