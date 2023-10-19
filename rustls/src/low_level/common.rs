@@ -8,9 +8,10 @@ use pki_types::UnixTime;
 use std::sync::Arc;
 
 use crate::crypto::cipher::OpaqueMessage;
-use crate::msgs::codec::Reader;
+use crate::msgs::base::{Payload, PayloadU8};
+use crate::msgs::codec::{Reader, Codec};
 use crate::msgs::enums::ECPointFormat;
-use crate::msgs::handshake::{CertificateStatusRequest, ClientExtension};
+use crate::msgs::handshake::{CertificateStatusRequest, ClientExtension, ServerKeyExchangePayload};
 use crate::{
     msgs::{
         enums::Compression,
@@ -31,6 +32,9 @@ enum CommonState {
     WaitServerHello,
     WaitCert { offset: usize },
     WaitServerKeyExchange { offset: usize },
+    WaitServerHelloDone { offset: usize, server_key: Payload },
+    WriteClientKeyExchange(Payload),
+    SendClientKeyExchange,
 }
 
 /// both `LlClientConnection` and `LlServerConnection` implement `DerefMut<Target = LlConnectionCommon>`
@@ -58,13 +62,13 @@ impl LlConnectionCommon {
     ) -> Result<Status<'c, 'i>, Error> {
         loop {
             match std::dbg!(&self.state) {
-                CommonState::StartHandshake => {
+                CommonState::StartHandshake | &CommonState::WriteClientKeyExchange(_) => {
                     return Ok(Status {
                         discard: 0,
                         state: State::MustEncryptTlsData(MustEncryptTlsData { conn: self }),
                     });
                 }
-                CommonState::SendClientHello => {
+                CommonState::SendClientHello | CommonState::SendClientKeyExchange => {
                     return Ok(Status {
                         discard: 0,
                         state: State::MustTransmitTlsData(MustTransmitTlsData { conn: self }),
@@ -159,7 +163,76 @@ impl LlConnectionCommon {
                     }
                 }
                 &CommonState::WaitServerKeyExchange { offset } => {
-                    todo!()
+                    let mut reader = Reader::init(&incoming_tls[offset..]);
+                    let m = OpaqueMessage::read(&mut reader)
+                        .unwrap()
+                        .into_plain_message();
+
+                    let msg = Message::try_from(m).unwrap();
+
+                    match msg.payload {
+                        MessagePayload::Handshake {
+                            parsed:
+                                HandshakeMessagePayload {
+                                    typ: HandshakeType::ServerKeyExchange,
+                                    payload: HandshakePayload::ServerKeyExchange(payload),
+                                },
+                            ..
+                        } => match payload {
+                            ServerKeyExchangePayload::ECDHE(_) => todo!(),
+                            ServerKeyExchangePayload::Unknown(payload) => {
+                                self.state = CommonState::WaitServerHelloDone {
+                                    offset: offset + reader.used(),
+                                    server_key: payload,
+                                };
+                            }
+                        },
+                        _ => {
+                            return Err(Error::InvalidMessage(InvalidMessage::UnexpectedMessage(
+                                "expected server key exchange",
+                            )));
+                        }
+                    }
+                }
+                CommonState::WaitServerHelloDone { offset, server_key } => {
+                    let mut reader = Reader::init(&incoming_tls[*offset..]);
+                    let m = OpaqueMessage::read(&mut reader)
+                        .unwrap()
+                        .into_plain_message();
+
+                    let msg = Message::try_from(m).unwrap();
+
+                    match msg.payload {
+                        MessagePayload::Handshake {
+                            parsed:
+                                HandshakeMessagePayload {
+                                    typ: HandshakeType::CertificateRequest,
+                                    payload: HandshakePayload::CertificateRequest(_),
+                                },
+                            ..
+                        } => {
+                            self.state = CommonState::WaitServerHelloDone {
+                                offset: offset + reader.used(),
+                                server_key: server_key.clone(),
+                            };
+                        }
+                        MessagePayload::Handshake {
+                            parsed:
+                                HandshakeMessagePayload {
+                                    typ: HandshakeType::ServerHelloDone,
+                                    payload: HandshakePayload::ServerHelloDone,
+                                },
+                            ..
+                        } => {
+                            self.state = CommonState::WriteClientKeyExchange(server_key.clone());
+                        }
+                        _ => {
+                            std::dbg!(msg.payload);
+                            return Err(Error::InvalidMessage(InvalidMessage::UnexpectedMessage(
+                                "expected server hello done",
+                            )));
+                        }
+                    }
                 }
             }
         }
@@ -179,53 +252,81 @@ impl LlConnectionCommon {
 
     fn encrypt_tls_data(&mut self, outgoing_tls: &mut [u8]) -> Result<usize, EncryptError> {
         let message_fragmenter = MessageFragmenter::default();
-        let support_tls12 = self
-            .config
-            .supports_version(ProtocolVersion::TLSv1_2);
 
-        let mut supported_versions = Vec::new();
-        if support_tls12 {
-            supported_versions.push(ProtocolVersion::TLSv1_2);
-        }
-        let parsed = HandshakeMessagePayload {
-            typ: HandshakeType::ClientHello,
-            payload: HandshakePayload::ClientHello(ClientHelloPayload {
-                client_version: ProtocolVersion::TLSv1_2,
-                random: Random([0u8; 32]),
-                session_id: SessionId::empty(),
-                cipher_suites: self
+        let msg = match &mut self.state {
+            CommonState::StartHandshake => {
+                let support_tls12 = self
                     .config
-                    .cipher_suites
-                    .iter()
-                    .map(|cs| cs.suite())
-                    .collect(),
-                compression_methods: vec![Compression::Null],
-                extensions: vec![
-                    ClientExtension::SupportedVersions(supported_versions),
-                    ClientExtension::ECPointFormats(ECPointFormat::SUPPORTED.to_vec()),
-                    ClientExtension::NamedGroups(
-                        self.config
-                            .kx_groups
-                            .iter()
-                            .map(|skxg| skxg.name())
-                            .collect(),
-                    ),
-                    ClientExtension::SignatureAlgorithms(
-                        self.config
-                            .verifier
-                            .supported_verify_schemes(),
-                    ),
-                    ClientExtension::ExtendedMasterSecretRequest,
-                    ClientExtension::CertificateStatusRequest(
-                        CertificateStatusRequest::build_ocsp(),
-                    ),
-                ],
-            }),
-        };
+                    .supports_version(ProtocolVersion::TLSv1_2);
 
-        let msg = Message {
-            version: ProtocolVersion::TLSv1_0,
-            payload: MessagePayload::handshake(parsed),
+                let mut supported_versions = Vec::new();
+                if support_tls12 {
+                    supported_versions.push(ProtocolVersion::TLSv1_2);
+                }
+
+                self.state = CommonState::SendClientHello;
+
+                let payload = HandshakeMessagePayload {
+                    typ: HandshakeType::ClientHello,
+                    payload: HandshakePayload::ClientHello(ClientHelloPayload {
+                        client_version: ProtocolVersion::TLSv1_2,
+                        random: Random([0u8; 32]),
+                        session_id: SessionId::empty(),
+                        cipher_suites: self
+                            .config
+                            .cipher_suites
+                            .iter()
+                            .map(|cs| cs.suite())
+                            .collect(),
+                        compression_methods: vec![Compression::Null],
+                        extensions: vec![
+                            ClientExtension::SupportedVersions(supported_versions),
+                            ClientExtension::ECPointFormats(ECPointFormat::SUPPORTED.to_vec()),
+                            ClientExtension::NamedGroups(
+                                self.config
+                                    .kx_groups
+                                    .iter()
+                                    .map(|skxg| skxg.name())
+                                    .collect(),
+                            ),
+                            ClientExtension::SignatureAlgorithms(
+                                self.config
+                                    .verifier
+                                    .supported_verify_schemes(),
+                            ),
+                            ClientExtension::ExtendedMasterSecretRequest,
+                            ClientExtension::CertificateStatusRequest(
+                                CertificateStatusRequest::build_ocsp(),
+                            ),
+                        ],
+                    }),
+                };
+
+                Message {
+                    version: ProtocolVersion::TLSv1_0,
+                    payload: MessagePayload::handshake(payload),
+                }
+            }
+
+            CommonState::WriteClientKeyExchange(key) => {
+                let mut buf = Vec::new();
+                let ecpoint = PayloadU8::new(key.0.clone());
+                ecpoint.encode(&mut buf);
+                let pubkey = Payload::new(buf);
+
+                let payload = HandshakeMessagePayload {
+                    typ: HandshakeType::ClientKeyExchange,
+                    payload: HandshakePayload::ClientKeyExchange(pubkey),
+                };
+
+                self.state = CommonState::SendClientKeyExchange;
+
+                Message {
+                    version: ProtocolVersion::TLSv1_2,
+                    payload: MessagePayload::handshake(payload),
+                }
+            }
+            _ => unreachable!(),
         };
 
         let mut written_bytes = 0;
@@ -243,13 +344,17 @@ impl LlConnectionCommon {
             written_bytes += bytes.len();
         }
 
-        self.state = CommonState::SendClientHello;
-
         Ok(written_bytes)
     }
 
     fn tls_data_done(&mut self) {
-        self.state = CommonState::WaitServerHello;
+        match self.state {
+            CommonState::SendClientHello => {
+                self.state = CommonState::WaitServerHello;
+            }
+            CommonState::SendClientKeyExchange => todo!(),
+            _ => unreachable!(),
+        }
     }
 
     fn encrypt_traffic_transit(
