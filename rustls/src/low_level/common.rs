@@ -7,11 +7,12 @@ use alloc::vec::Vec;
 use pki_types::UnixTime;
 use std::sync::Arc;
 
+use crate::client::tls12::ServerKxDetails;
 use crate::crypto::cipher::OpaqueMessage;
 use crate::msgs::base::{Payload, PayloadU8};
-use crate::msgs::codec::{Reader, Codec};
+use crate::msgs::codec::{Codec, Reader};
 use crate::msgs::enums::ECPointFormat;
-use crate::msgs::handshake::{CertificateStatusRequest, ClientExtension, ServerKeyExchangePayload};
+use crate::msgs::handshake::{CertificateStatusRequest, ClientExtension, ServerKeyExchangePayload, ServerEcdhParams};
 use crate::{
     msgs::{
         enums::Compression,
@@ -23,17 +24,27 @@ use crate::{
     },
     ClientConfig, Error, HandshakeType, ProtocolVersion,
 };
-use crate::{InvalidMessage, ServerName};
+use crate::{InvalidMessage, ServerName, SupportedCipherSuite, Tls12CipherSuite};
 
 #[derive(Debug)]
 enum CommonState {
     StartHandshake,
     SendClientHello,
     WaitServerHello,
-    WaitCert { offset: usize },
-    WaitServerKeyExchange { offset: usize },
-    WaitServerHelloDone { offset: usize, server_key: Payload },
-    WriteClientKeyExchange(Payload),
+    WaitCert {
+        offset: usize,
+        suite: &'static Tls12CipherSuite,
+    },
+    WaitServerKeyExchange {
+        offset: usize,
+        suite: &'static Tls12CipherSuite,
+    },
+    WaitServerHelloDone {
+        offset: usize,
+        suite: &'static Tls12CipherSuite,
+        opaque_kx: ServerKeyExchangePayload,
+    },
+    WriteClientKeyExchange(ServerKxDetails),
     SendClientKeyExchange,
 }
 
@@ -61,8 +72,8 @@ impl LlConnectionCommon {
         incoming_tls: &'i mut [u8],
     ) -> Result<Status<'c, 'i>, Error> {
         loop {
-            match std::dbg!(&self.state) {
-                CommonState::StartHandshake | &CommonState::WriteClientKeyExchange(_) => {
+            match self.state {
+                CommonState::StartHandshake | CommonState::WriteClientKeyExchange(_) => {
                     return Ok(Status {
                         discard: 0,
                         state: State::MustEncryptTlsData(MustEncryptTlsData { conn: self }),
@@ -100,7 +111,20 @@ impl LlConnectionCommon {
                             } => {
                                 std::println!("Received ServerHello: {:?}", payload);
 
-                                self.state = CommonState::WaitCert { offset: read_bytes };
+                                let suite = self
+                                    .config
+                                    .find_cipher_suite(payload.cipher_suite)
+                                    .unwrap();
+
+                                let suite = match suite {
+                                    SupportedCipherSuite::Tls12(suite) => suite,
+                                    SupportedCipherSuite::Tls13(_) => todo!(),
+                                };
+
+                                self.state = CommonState::WaitCert {
+                                    offset: read_bytes,
+                                    suite,
+                                };
                             }
                             _ => {
                                 return Err(Error::InvalidMessage(
@@ -110,12 +134,12 @@ impl LlConnectionCommon {
                         }
                     }
                 }
-                &CommonState::WaitCert { offset } => {
+                CommonState::WaitCert { offset, suite } => {
                     if incoming_tls[offset..]
                         .iter()
                         .all(|&b| b == 0)
                     {
-                        self.state = CommonState::WaitCert { offset: 0 };
+                        self.state = CommonState::WaitCert { offset: 0, suite };
                         return Ok(Status {
                             discard: offset,
                             state: State::NeedsMoreTlsData { num_bytes: None },
@@ -150,6 +174,7 @@ impl LlConnectionCommon {
 
                                 self.state = CommonState::WaitServerKeyExchange {
                                     offset: offset + reader.used(),
+                                    suite,
                                 };
                             }
                             _ => {
@@ -162,7 +187,7 @@ impl LlConnectionCommon {
                         }
                     }
                 }
-                &CommonState::WaitServerKeyExchange { offset } => {
+                CommonState::WaitServerKeyExchange { offset, suite } => {
                     let mut reader = Reader::init(&incoming_tls[offset..]);
                     let m = OpaqueMessage::read(&mut reader)
                         .unwrap()
@@ -175,18 +200,16 @@ impl LlConnectionCommon {
                             parsed:
                                 HandshakeMessagePayload {
                                     typ: HandshakeType::ServerKeyExchange,
-                                    payload: HandshakePayload::ServerKeyExchange(payload),
+                                    payload: HandshakePayload::ServerKeyExchange(opaque_kx),
                                 },
                             ..
-                        } => match payload {
-                            ServerKeyExchangePayload::ECDHE(_) => todo!(),
-                            ServerKeyExchangePayload::Unknown(payload) => {
-                                self.state = CommonState::WaitServerHelloDone {
-                                    offset: offset + reader.used(),
-                                    server_key: payload,
-                                };
-                            }
-                        },
+                        } => {
+                            self.state = CommonState::WaitServerHelloDone {
+                                offset: offset + reader.used(),
+                                suite,
+                                opaque_kx,
+                            };
+                        }
                         _ => {
                             return Err(Error::InvalidMessage(InvalidMessage::UnexpectedMessage(
                                 "expected server key exchange",
@@ -194,8 +217,12 @@ impl LlConnectionCommon {
                         }
                     }
                 }
-                CommonState::WaitServerHelloDone { offset, server_key } => {
-                    let mut reader = Reader::init(&incoming_tls[*offset..]);
+                CommonState::WaitServerHelloDone {
+                    offset,
+                    suite,
+                    ref opaque_kx,
+                } => {
+                    let mut reader = Reader::init(&incoming_tls[offset..]);
                     let m = OpaqueMessage::read(&mut reader)
                         .unwrap()
                         .into_plain_message();
@@ -213,7 +240,8 @@ impl LlConnectionCommon {
                         } => {
                             self.state = CommonState::WaitServerHelloDone {
                                 offset: offset + reader.used(),
-                                server_key: server_key.clone(),
+                                suite,
+                                opaque_kx: opaque_kx.clone(),
                             };
                         }
                         MessagePayload::Handshake {
@@ -224,7 +252,15 @@ impl LlConnectionCommon {
                                 },
                             ..
                         } => {
-                            self.state = CommonState::WriteClientKeyExchange(server_key.clone());
+                            let ecdhe = opaque_kx
+                                .unwrap_given_kxa(suite.kx)
+                                .unwrap();
+
+                            let mut kx_params = Vec::new();
+                            ecdhe.params.encode(&mut kx_params);
+                            let server_kx = ServerKxDetails::new(kx_params, ecdhe.dss);
+
+                            self.state = CommonState::WriteClientKeyExchange(server_kx);
                         }
                         _ => {
                             std::dbg!(msg.payload);
@@ -281,7 +317,7 @@ impl LlConnectionCommon {
                         compression_methods: vec![Compression::Null],
                         extensions: vec![
                             ClientExtension::SupportedVersions(supported_versions),
-                            ClientExtension::ECPointFormats(ECPointFormat::SUPPORTED.to_vec()),
+                            ClientExtension::EcPointFormats(ECPointFormat::SUPPORTED.to_vec()),
                             ClientExtension::NamedGroups(
                                 self.config
                                     .kx_groups
@@ -308,9 +344,21 @@ impl LlConnectionCommon {
                 }
             }
 
-            CommonState::WriteClientKeyExchange(key) => {
+            CommonState::WriteClientKeyExchange(server_kx) => {
+                let mut rd = Reader::init(&server_kx.kx_params);
+                let ecdh_params = ServerEcdhParams::read(&mut rd).unwrap();
+                assert!(!rd.any_left());
+
+                let named_group = ecdh_params.curve_params.named_group;
+                let skxg = self
+                    .config
+                    .find_kx_group(named_group)
+                    .unwrap();
+
+                let kx = skxg.start().unwrap();
+
                 let mut buf = Vec::new();
-                let ecpoint = PayloadU8::new(key.0.clone());
+                let ecpoint = PayloadU8::new(Vec::from(kx.pub_key()));
                 ecpoint.encode(&mut buf);
                 let pubkey = Payload::new(buf);
 

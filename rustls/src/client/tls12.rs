@@ -503,13 +503,14 @@ fn emit_finished(
     common.send_msg(f, true);
 }
 
-struct ServerKxDetails {
-    kx_params: Vec<u8>,
+#[derive(Debug)]
+pub(crate) struct ServerKxDetails {
+    pub(crate) kx_params: Vec<u8>,
     kx_sig: DigitallySignedStruct,
 }
 
 impl ServerKxDetails {
-    fn new(params: Vec<u8>, sig: DigitallySignedStruct) -> Self {
+    pub(crate) fn new(params: Vec<u8>, sig: DigitallySignedStruct) -> Self {
         Self {
             kx_params: params,
             kx_sig: sig,

@@ -441,7 +441,7 @@ pub mod client {
     pub(super) mod handy;
     pub(super) mod hs;
     #[cfg(feature = "tls12")]
-    mod tls12;
+    pub(crate) mod tls12;
     mod tls13;
 
     pub use crate::dns_name::InvalidDnsNameError;

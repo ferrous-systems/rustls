@@ -286,14 +286,14 @@ impl ClientConfig {
         danger::DangerousClientConfig { cfg: self }
     }
 
-    pub(super) fn find_cipher_suite(&self, suite: CipherSuite) -> Option<SupportedCipherSuite> {
+    pub(crate) fn find_cipher_suite(&self, suite: CipherSuite) -> Option<SupportedCipherSuite> {
         self.cipher_suites
             .iter()
             .copied()
             .find(|&scs| scs.suite() == suite)
     }
 
-    pub(super) fn find_kx_group(&self, group: NamedGroup) -> Option<&'static dyn SupportedKxGroup> {
+    pub(crate) fn find_kx_group(&self, group: NamedGroup) -> Option<&'static dyn SupportedKxGroup> {
         self.kx_groups
             .iter()
             .copied()
