@@ -286,7 +286,7 @@ impl<'a> io::Write for Writer<'a> {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct ConnectionRandoms {
     pub(crate) client: [u8; 32],
     pub(crate) server: [u8; 32],

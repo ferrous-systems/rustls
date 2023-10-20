@@ -44,7 +44,7 @@ fn main() -> io::Result<()> {
             .unwrap();
 
         dbg!(outgoing_used);
-        match dbg!(state) {
+        match state {
             // logic similar to the one presented in the 'handling InsufficientSizeError' section is
             // used in these states
             State::MustEncryptTlsData(mut state) => {

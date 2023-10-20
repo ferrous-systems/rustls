@@ -8,12 +8,17 @@ use pki_types::UnixTime;
 use std::sync::Arc;
 
 use crate::client::tls12::ServerKxDetails;
+use crate::conn::ConnectionRandoms;
 use crate::crypto::cipher::OpaqueMessage;
+use crate::internal::record_layer::RecordLayer;
 use crate::msgs::base::{Payload, PayloadU8};
 use crate::msgs::ccs::ChangeCipherSpecPayload;
 use crate::msgs::codec::{Codec, Reader};
 use crate::msgs::enums::ECPointFormat;
-use crate::msgs::handshake::{CertificateStatusRequest, ClientExtension, ServerKeyExchangePayload, ServerEcdhParams};
+use crate::msgs::handshake::{
+    CertificateStatusRequest, ClientExtension, ServerEcdhParams, ServerKeyExchangePayload,
+};
+use crate::tls12::ConnectionSecrets;
 use crate::{
     msgs::{
         enums::Compression,
@@ -25,7 +30,7 @@ use crate::{
     },
     ClientConfig, Error, HandshakeType, ProtocolVersion,
 };
-use crate::{InvalidMessage, ServerName, SupportedCipherSuite, Tls12CipherSuite};
+use crate::{InvalidMessage, ServerName, Side, SupportedCipherSuite, Tls12CipherSuite};
 
 #[derive(Debug)]
 enum CommonState {
@@ -35,17 +40,24 @@ enum CommonState {
     WaitCert {
         offset: usize,
         suite: &'static Tls12CipherSuite,
+        randoms: ConnectionRandoms,
     },
     WaitServerKeyExchange {
         offset: usize,
         suite: &'static Tls12CipherSuite,
+        randoms: ConnectionRandoms,
     },
     WaitServerHelloDone {
         offset: usize,
         suite: &'static Tls12CipherSuite,
         opaque_kx: ServerKeyExchangePayload,
+        randoms: ConnectionRandoms,
     },
-    WriteClientKeyExchange(ServerKxDetails),
+    WriteClientKeyExchange {
+        suite: &'static Tls12CipherSuite,
+        server_kx: ServerKxDetails,
+        randoms: ConnectionRandoms,
+    },
     SendClientKeyExchange,
     WriteChangeCipherSpec,
     SendChangeCipherSpec,
@@ -54,11 +66,11 @@ enum CommonState {
 }
 
 /// both `LlClientConnection` and `LlServerConnection` implement `DerefMut<Target = LlConnectionCommon>`
-#[derive(Debug)]
 pub struct LlConnectionCommon {
     config: Arc<ClientConfig>,
     name: ServerName,
     state: CommonState,
+    record_layer: RecordLayer,
 }
 
 impl LlConnectionCommon {
@@ -68,6 +80,7 @@ impl LlConnectionCommon {
             config,
             name,
             state: CommonState::StartHandshake,
+            record_layer: RecordLayer::new(),
         }
     }
 
@@ -77,9 +90,10 @@ impl LlConnectionCommon {
         incoming_tls: &'i mut [u8],
     ) -> Result<Status<'c, 'i>, Error> {
         loop {
+            std::dbg!(&self.state);
             match self.state {
                 CommonState::StartHandshake
-                | CommonState::WriteClientKeyExchange(_)
+                | CommonState::WriteClientKeyExchange { .. }
                 | CommonState::WriteChangeCipherSpec
                 | CommonState::WriteFinished => {
                     return Ok(Status {
@@ -135,6 +149,10 @@ impl LlConnectionCommon {
                                 self.state = CommonState::WaitCert {
                                     offset: read_bytes,
                                     suite,
+                                    randoms: ConnectionRandoms::new(
+                                        Random([0u8; 32]),
+                                        payload.random,
+                                    ),
                                 };
                             }
                             _ => {
@@ -145,12 +163,20 @@ impl LlConnectionCommon {
                         }
                     }
                 }
-                CommonState::WaitCert { offset, suite } => {
+                CommonState::WaitCert {
+                    offset,
+                    suite,
+                    ref randoms,
+                } => {
                     if incoming_tls[offset..]
                         .iter()
                         .all(|&b| b == 0)
                     {
-                        self.state = CommonState::WaitCert { offset: 0, suite };
+                        self.state = CommonState::WaitCert {
+                            offset: 0,
+                            suite,
+                            randoms: randoms.clone(),
+                        };
                         return Ok(Status {
                             discard: offset,
                             state: State::NeedsMoreTlsData { num_bytes: None },
@@ -186,6 +212,7 @@ impl LlConnectionCommon {
                                 self.state = CommonState::WaitServerKeyExchange {
                                     offset: offset + reader.used(),
                                     suite,
+                                    randoms: randoms.clone(),
                                 };
                             }
                             _ => {
@@ -198,7 +225,11 @@ impl LlConnectionCommon {
                         }
                     }
                 }
-                CommonState::WaitServerKeyExchange { offset, suite } => {
+                CommonState::WaitServerKeyExchange {
+                    offset,
+                    suite,
+                    ref randoms,
+                } => {
                     let mut reader = Reader::init(&incoming_tls[offset..]);
                     let m = OpaqueMessage::read(&mut reader)
                         .unwrap()
@@ -218,6 +249,7 @@ impl LlConnectionCommon {
                             self.state = CommonState::WaitServerHelloDone {
                                 offset: offset + reader.used(),
                                 suite,
+                                randoms: randoms.clone(),
                                 opaque_kx,
                             };
                         }
@@ -231,6 +263,7 @@ impl LlConnectionCommon {
                 CommonState::WaitServerHelloDone {
                     offset,
                     suite,
+                    ref randoms,
                     ref opaque_kx,
                 } => {
                     let mut reader = Reader::init(&incoming_tls[offset..]);
@@ -252,6 +285,7 @@ impl LlConnectionCommon {
                             self.state = CommonState::WaitServerHelloDone {
                                 offset: offset + reader.used(),
                                 suite,
+                                randoms: randoms.clone(),
                                 opaque_kx: opaque_kx.clone(),
                             };
                         }
@@ -271,7 +305,11 @@ impl LlConnectionCommon {
                             ecdhe.params.encode(&mut kx_params);
                             let server_kx = ServerKxDetails::new(kx_params, ecdhe.dss);
 
-                            self.state = CommonState::WriteClientKeyExchange(server_kx);
+                            self.state = CommonState::WriteClientKeyExchange {
+                                suite,
+                                server_kx,
+                                randoms: randoms.clone(),
+                            };
                         }
                         _ => {
                             std::dbg!(msg.payload);
@@ -299,6 +337,7 @@ impl LlConnectionCommon {
 
     fn encrypt_tls_data(&mut self, outgoing_tls: &mut [u8]) -> Result<usize, EncryptError> {
         let message_fragmenter = MessageFragmenter::default();
+        let mut is_encrypted = false;
 
         let msg = match &mut self.state {
             CommonState::StartHandshake => {
@@ -355,7 +394,11 @@ impl LlConnectionCommon {
                 }
             }
 
-            CommonState::WriteClientKeyExchange(server_kx) => {
+            CommonState::WriteClientKeyExchange {
+                suite,
+                server_kx,
+                randoms,
+            } => {
                 let mut rd = Reader::init(&server_kx.kx_params);
                 let ecdh_params = ServerEcdhParams::read(&mut rd).unwrap();
                 assert!(!rd.any_left());
@@ -378,6 +421,22 @@ impl LlConnectionCommon {
                     payload: HandshakePayload::ClientKeyExchange(pubkey),
                 };
 
+                let secrets = ConnectionSecrets::from_key_exchange(
+                    kx,
+                    &ecdh_params.public.0,
+                    None,
+                    randoms.clone(),
+                    suite,
+                )
+                .unwrap();
+
+                let (dec, enc) = secrets.make_cipher_pair(Side::Client);
+                self.record_layer
+                    .prepare_message_encrypter(enc);
+                self.record_layer
+                    .prepare_message_decrypter(dec);
+                self.record_layer.start_encrypting();
+
                 self.state = CommonState::SendClientKeyExchange;
 
                 Message {
@@ -397,6 +456,7 @@ impl LlConnectionCommon {
                 let verify_data_payload = Payload::new(vec![]);
 
                 self.state = CommonState::SendFinished;
+                is_encrypted = true;
 
                 Message {
                     version: ProtocolVersion::TLSv1_2,
@@ -411,8 +471,14 @@ impl LlConnectionCommon {
 
         let mut written_bytes = 0;
 
-        for m in message_fragmenter.fragment_message(&msg.into()) {
-            let bytes = m.to_unencrypted_opaque().encode();
+        for m in message_fragmenter.fragment_message(&std::dbg!(msg).into()) {
+            let opaque_msg = if is_encrypted {
+                self.record_layer.encrypt_outgoing(m)
+            } else {
+                m.to_unencrypted_opaque()
+            };
+
+            let bytes = opaque_msg.encode();
 
             if bytes.len() > outgoing_tls.len() {
                 return Err(EncryptError::InsufficientSize(InsufficientSizeError {
@@ -466,7 +532,6 @@ pub struct Status<'c, 'i> {
 }
 
 /// FIXME: docs
-#[derive(Debug)]
 pub enum State<'c, 'i> {
     /// One, or more, application data record is available
     AppDataAvailable(AppDataAvailable<'c, 'i>),
@@ -505,7 +570,6 @@ pub struct AppDataRecord<'i> {
 }
 
 /// FIXME: docs
-#[derive(Debug)]
 pub struct AppDataAvailable<'c, 'i> {
     /// FIXME: docs
     _conn: &'c mut LlConnectionCommon,
@@ -531,7 +595,6 @@ impl<'c, 'i> AppDataAvailable<'c, 'i> {
 }
 
 /// FIXME: docs
-#[derive(Debug)]
 pub struct MayEncryptAppData<'c> {
     /// FIXME: docs
     conn: &'c mut LlConnectionCommon,
@@ -565,7 +628,6 @@ impl<'c> MayEncryptAppData<'c> {
 }
 
 /// FIXME: docs
-#[derive(Debug)]
 pub struct MustEncryptTlsData<'c> {
     /// FIXME: docs
     conn: &'c mut LlConnectionCommon,
@@ -592,7 +654,6 @@ impl<'c> MustEncryptTlsData<'c> {
 }
 
 /// FIXME: docs
-#[derive(Debug)]
 pub struct MustTransmitTlsData<'c> {
     /// FIXME: docs
     conn: &'c mut LlConnectionCommon,
@@ -606,7 +667,6 @@ impl<'c> MustTransmitTlsData<'c> {
 }
 
 /// FIXME: docs
-#[derive(Debug)]
 pub struct TrafficTransit<'c> {
     /// FIXME: docs
     conn: &'c mut LlConnectionCommon,
