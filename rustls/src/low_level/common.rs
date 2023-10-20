@@ -49,6 +49,8 @@ enum CommonState {
     SendClientKeyExchange,
     WriteChangeCipherSpec,
     SendChangeCipherSpec,
+    WriteFinished,
+    SendFinished,
 }
 
 /// both `LlClientConnection` and `LlServerConnection` implement `DerefMut<Target = LlConnectionCommon>`
@@ -78,7 +80,8 @@ impl LlConnectionCommon {
             match self.state {
                 CommonState::StartHandshake
                 | CommonState::WriteClientKeyExchange(_)
-                | CommonState::WriteChangeCipherSpec => {
+                | CommonState::WriteChangeCipherSpec
+                | CommonState::WriteFinished => {
                     return Ok(Status {
                         discard: 0,
                         state: State::MustEncryptTlsData(MustEncryptTlsData { conn: self }),
@@ -86,7 +89,8 @@ impl LlConnectionCommon {
                 }
                 CommonState::SendClientHello
                 | CommonState::SendClientKeyExchange
-                | CommonState::SendChangeCipherSpec => {
+                | CommonState::SendChangeCipherSpec
+                | CommonState::SendFinished => {
                     return Ok(Status {
                         discard: 0,
                         state: State::MustTransmitTlsData(MustTransmitTlsData { conn: self }),
@@ -389,6 +393,19 @@ impl LlConnectionCommon {
                     payload: MessagePayload::ChangeCipherSpec(ChangeCipherSpecPayload {}),
                 }
             }
+            CommonState::WriteFinished => {
+                let verify_data_payload = Payload::new(vec![]);
+
+                self.state = CommonState::SendFinished;
+
+                Message {
+                    version: ProtocolVersion::TLSv1_2,
+                    payload: MessagePayload::handshake(HandshakeMessagePayload {
+                        typ: HandshakeType::Finished,
+                        payload: HandshakePayload::Finished(verify_data_payload),
+                    }),
+                }
+            }
             _ => unreachable!(),
         };
 
@@ -419,6 +436,9 @@ impl LlConnectionCommon {
                 self.state = CommonState::WriteChangeCipherSpec;
             }
             CommonState::SendChangeCipherSpec => {
+                self.state = CommonState::WriteFinished;
+            }
+            CommonState::SendFinished => {
                 todo!()
             }
             _ => unreachable!(),
