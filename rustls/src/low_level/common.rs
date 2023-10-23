@@ -34,6 +34,7 @@ use crate::{InvalidMessage, ServerName, Side, SupportedCipherSuite, Tls12CipherS
 
 #[derive(Debug)]
 enum CommonState {
+    Unreachable,
     StartHandshake,
     SendClientHello,
     WaitServerHello,
@@ -65,6 +66,12 @@ enum CommonState {
     SendFinished,
 }
 
+impl CommonState {
+    fn take(&mut self) -> Self {
+        core::mem::replace(self, Self::Unreachable)
+    }
+}
+
 /// both `LlClientConnection` and `LlServerConnection` implement `DerefMut<Target = LlConnectionCommon>`
 pub struct LlConnectionCommon {
     config: Arc<ClientConfig>,
@@ -91,27 +98,34 @@ impl LlConnectionCommon {
     ) -> Result<Status<'c, 'i>, Error> {
         loop {
             std::dbg!(&self.state);
-            match self.state {
-                CommonState::StartHandshake
+            match self.state.take() {
+                CommonState::Unreachable => unreachable!(),
+                state @ (CommonState::StartHandshake
                 | CommonState::WriteClientKeyExchange { .. }
                 | CommonState::WriteChangeCipherSpec
-                | CommonState::WriteFinished => {
+                | CommonState::WriteFinished) => {
+                    self.state = state;
+
                     return Ok(Status {
                         discard: 0,
                         state: State::MustEncryptTlsData(MustEncryptTlsData { conn: self }),
                     });
                 }
-                CommonState::SendClientHello
+                state @ (CommonState::SendClientHello
                 | CommonState::SendClientKeyExchange
                 | CommonState::SendChangeCipherSpec
-                | CommonState::SendFinished => {
+                | CommonState::SendFinished) => {
+                    self.state = state;
+
                     return Ok(Status {
                         discard: 0,
                         state: State::MustTransmitTlsData(MustTransmitTlsData { conn: self }),
                     });
                 }
-                CommonState::WaitServerHello => {
+                state @ CommonState::WaitServerHello => {
                     if incoming_tls.iter().all(|&b| b == 0) {
+                        self.state = state;
+
                         return Ok(Status {
                             discard: 0,
                             state: State::NeedsMoreTlsData { num_bytes: None },
@@ -166,7 +180,7 @@ impl LlConnectionCommon {
                 CommonState::WaitCert {
                     offset,
                     suite,
-                    ref randoms,
+                    randoms,
                 } => {
                     if incoming_tls[offset..]
                         .iter()
@@ -175,8 +189,9 @@ impl LlConnectionCommon {
                         self.state = CommonState::WaitCert {
                             offset: 0,
                             suite,
-                            randoms: randoms.clone(),
+                            randoms,
                         };
+
                         return Ok(Status {
                             discard: offset,
                             state: State::NeedsMoreTlsData { num_bytes: None },
@@ -212,7 +227,7 @@ impl LlConnectionCommon {
                                 self.state = CommonState::WaitServerKeyExchange {
                                     offset: offset + reader.used(),
                                     suite,
-                                    randoms: randoms.clone(),
+                                    randoms,
                                 };
                             }
                             _ => {
@@ -228,7 +243,7 @@ impl LlConnectionCommon {
                 CommonState::WaitServerKeyExchange {
                     offset,
                     suite,
-                    ref randoms,
+                    randoms,
                 } => {
                     let mut reader = Reader::init(&incoming_tls[offset..]);
                     let m = OpaqueMessage::read(&mut reader)
@@ -249,7 +264,7 @@ impl LlConnectionCommon {
                             self.state = CommonState::WaitServerHelloDone {
                                 offset: offset + reader.used(),
                                 suite,
-                                randoms: randoms.clone(),
+                                randoms,
                                 opaque_kx,
                             };
                         }
@@ -263,8 +278,8 @@ impl LlConnectionCommon {
                 CommonState::WaitServerHelloDone {
                     offset,
                     suite,
-                    ref randoms,
-                    ref opaque_kx,
+                    randoms,
+                    opaque_kx,
                 } => {
                     let mut reader = Reader::init(&incoming_tls[offset..]);
                     let m = OpaqueMessage::read(&mut reader)
@@ -285,8 +300,8 @@ impl LlConnectionCommon {
                             self.state = CommonState::WaitServerHelloDone {
                                 offset: offset + reader.used(),
                                 suite,
-                                randoms: randoms.clone(),
-                                opaque_kx: opaque_kx.clone(),
+                                randoms,
+                                opaque_kx,
                             };
                         }
                         MessagePayload::Handshake {
@@ -308,7 +323,7 @@ impl LlConnectionCommon {
                             self.state = CommonState::WriteClientKeyExchange {
                                 suite,
                                 server_kx,
-                                randoms: randoms.clone(),
+                                randoms,
                             };
                         }
                         _ => {
@@ -339,7 +354,7 @@ impl LlConnectionCommon {
         let message_fragmenter = MessageFragmenter::default();
         let mut is_encrypted = false;
 
-        let msg = match &mut self.state {
+        let msg = match self.state.take() {
             CommonState::StartHandshake => {
                 let support_tls12 = self
                     .config
@@ -425,7 +440,7 @@ impl LlConnectionCommon {
                     kx,
                     &ecdh_params.public.0,
                     None,
-                    randoms.clone(),
+                    randoms,
                     suite,
                 )
                 .unwrap();
