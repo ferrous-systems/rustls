@@ -10,6 +10,7 @@ use std::sync::Arc;
 use crate::client::tls12::ServerKxDetails;
 use crate::conn::ConnectionRandoms;
 use crate::crypto::cipher::OpaqueMessage;
+use crate::hash_hs::HandshakeHashBuffer;
 use crate::internal::record_layer::RecordLayer;
 use crate::msgs::base::{Payload, PayloadU8};
 use crate::msgs::ccs::ChangeCipherSpecPayload;
@@ -36,8 +37,12 @@ use crate::{InvalidMessage, ServerName, Side, SupportedCipherSuite, Tls12CipherS
 enum CommonState {
     Unreachable,
     StartHandshake,
-    SendClientHello,
-    WaitServerHello,
+    SendClientHello {
+        transcript_buffer: HandshakeHashBuffer,
+    },
+    WaitServerHello {
+        transcript_buffer: HandshakeHashBuffer,
+    },
     WaitCert {
         offset: usize,
         suite: &'static Tls12CipherSuite,
@@ -111,7 +116,7 @@ impl LlConnectionCommon {
                         state: State::MustEncryptTlsData(MustEncryptTlsData { conn: self }),
                     });
                 }
-                state @ (CommonState::SendClientHello
+                state @ (CommonState::SendClientHello { .. }
                 | CommonState::SendClientKeyExchange
                 | CommonState::SendChangeCipherSpec
                 | CommonState::SendFinished) => {
@@ -122,7 +127,7 @@ impl LlConnectionCommon {
                         state: State::MustTransmitTlsData(MustTransmitTlsData { conn: self }),
                     });
                 }
-                state @ CommonState::WaitServerHello => {
+                state @ CommonState::WaitServerHello { .. } => {
                     if incoming_tls.iter().all(|&b| b == 0) {
                         self.state = state;
 
@@ -365,8 +370,6 @@ impl LlConnectionCommon {
                     supported_versions.push(ProtocolVersion::TLSv1_2);
                 }
 
-                self.state = CommonState::SendClientHello;
-
                 let payload = HandshakeMessagePayload {
                     typ: HandshakeType::ClientHello,
                     payload: HandshakePayload::ClientHello(ClientHelloPayload {
@@ -403,10 +406,16 @@ impl LlConnectionCommon {
                     }),
                 };
 
-                Message {
+                let msg = Message {
                     version: ProtocolVersion::TLSv1_0,
                     payload: MessagePayload::handshake(payload),
-                }
+                };
+
+                let mut transcript_buffer = HandshakeHashBuffer::new();
+                transcript_buffer.add_message(&msg);
+                self.state = CommonState::SendClientHello { transcript_buffer };
+
+                msg
             }
 
             CommonState::WriteClientKeyExchange {
@@ -509,9 +518,9 @@ impl LlConnectionCommon {
     }
 
     fn tls_data_done(&mut self) {
-        match self.state {
-            CommonState::SendClientHello => {
-                self.state = CommonState::WaitServerHello;
+        match self.state.take() {
+            CommonState::SendClientHello { transcript_buffer } => {
+                self.state = CommonState::WaitServerHello { transcript_buffer };
             }
             CommonState::SendClientKeyExchange => {
                 self.state = CommonState::WriteChangeCipherSpec;

@@ -13,6 +13,7 @@ use core::mem;
 /// Before we know the hash algorithm to use to verify the handshake, we just buffer the messages.
 /// During the handshake, we may restart the transcript due to a HelloRetryRequest, reverting
 /// from the `HandshakeHash` to a `HandshakeHashBuffer` again.
+#[derive(Debug)]
 pub(crate) struct HandshakeHashBuffer {
     buffer: Vec<u8>,
     client_auth_enabled: bool,
