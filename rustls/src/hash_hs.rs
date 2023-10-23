@@ -89,6 +89,14 @@ pub(crate) struct HandshakeHash {
     client_auth: Option<Vec<u8>>,
 }
 
+impl core::fmt::Debug for HandshakeHash {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("HandshakeHash")
+            .field("client_auth", &self.client_auth)
+            .finish_non_exhaustive()
+    }
+}
+
 impl HandshakeHash {
     /// We decided not to do client auth after all, so discard
     /// the transcript.

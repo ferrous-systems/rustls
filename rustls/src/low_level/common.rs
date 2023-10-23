@@ -10,7 +10,7 @@ use std::sync::Arc;
 use crate::client::tls12::ServerKxDetails;
 use crate::conn::ConnectionRandoms;
 use crate::crypto::cipher::OpaqueMessage;
-use crate::hash_hs::HandshakeHashBuffer;
+use crate::hash_hs::{HandshakeHash, HandshakeHashBuffer};
 use crate::internal::record_layer::RecordLayer;
 use crate::msgs::base::{Payload, PayloadU8};
 use crate::msgs::ccs::ChangeCipherSpecPayload;
@@ -47,27 +47,39 @@ enum CommonState {
         offset: usize,
         suite: &'static Tls12CipherSuite,
         randoms: ConnectionRandoms,
+        transcript: HandshakeHash,
     },
     WaitServerKeyExchange {
         offset: usize,
         suite: &'static Tls12CipherSuite,
         randoms: ConnectionRandoms,
+        transcript: HandshakeHash,
     },
     WaitServerHelloDone {
         offset: usize,
         suite: &'static Tls12CipherSuite,
         opaque_kx: ServerKeyExchangePayload,
         randoms: ConnectionRandoms,
+        transcript: HandshakeHash,
     },
     WriteClientKeyExchange {
         suite: &'static Tls12CipherSuite,
         server_kx: ServerKxDetails,
         randoms: ConnectionRandoms,
+        transcript: HandshakeHash,
     },
-    SendClientKeyExchange,
-    WriteChangeCipherSpec,
-    SendChangeCipherSpec,
-    WriteFinished,
+    SendClientKeyExchange {
+        transcript: HandshakeHash,
+    },
+    WriteChangeCipherSpec {
+        transcript: HandshakeHash,
+    },
+    SendChangeCipherSpec {
+        transcript: HandshakeHash,
+    },
+    WriteFinished {
+        transcript: HandshakeHash,
+    },
     SendFinished,
 }
 
@@ -107,8 +119,8 @@ impl LlConnectionCommon {
                 CommonState::Unreachable => unreachable!(),
                 state @ (CommonState::StartHandshake
                 | CommonState::WriteClientKeyExchange { .. }
-                | CommonState::WriteChangeCipherSpec
-                | CommonState::WriteFinished) => {
+                | CommonState::WriteChangeCipherSpec { .. }
+                | CommonState::WriteFinished { .. }) => {
                     self.state = state;
 
                     return Ok(Status {
@@ -117,8 +129,8 @@ impl LlConnectionCommon {
                     });
                 }
                 state @ (CommonState::SendClientHello { .. }
-                | CommonState::SendClientKeyExchange
-                | CommonState::SendChangeCipherSpec
+                | CommonState::SendClientKeyExchange { .. }
+                | CommonState::SendChangeCipherSpec { .. }
                 | CommonState::SendFinished) => {
                     self.state = state;
 
@@ -127,58 +139,62 @@ impl LlConnectionCommon {
                         state: State::MustTransmitTlsData(MustTransmitTlsData { conn: self }),
                     });
                 }
-                state @ CommonState::WaitServerHello { .. } => {
-                    if incoming_tls.iter().all(|&b| b == 0) {
-                        self.state = state;
+                state @ CommonState::WaitServerHello { .. }
+                    if incoming_tls.iter().all(|&b| b == 0) =>
+                {
+                    self.state = state;
 
-                        return Ok(Status {
-                            discard: 0,
-                            state: State::NeedsMoreTlsData { num_bytes: None },
-                        });
-                    } else {
-                        let mut reader = Reader::init(incoming_tls);
-                        let m = OpaqueMessage::read(&mut reader)
-                            .unwrap()
-                            .into_plain_message();
-                        let read_bytes = reader.used();
+                    return Ok(Status {
+                        discard: 0,
+                        state: State::NeedsMoreTlsData { num_bytes: None },
+                    });
+                }
+                CommonState::WaitServerHello { transcript_buffer } => {
+                    let mut reader = Reader::init(incoming_tls);
+                    let m = OpaqueMessage::read(&mut reader)
+                        .unwrap()
+                        .into_plain_message();
+                    let read_bytes = reader.used();
 
-                        let msg = Message::try_from(m).unwrap();
+                    let msg = Message::try_from(m).unwrap();
 
-                        match msg.payload {
-                            MessagePayload::Handshake {
-                                parsed:
-                                    HandshakeMessagePayload {
-                                        typ: HandshakeType::ServerHello,
-                                        payload: HandshakePayload::ServerHello(payload),
-                                    },
-                                ..
-                            } => {
-                                std::println!("Received ServerHello: {:?}", payload);
+                    match &msg.payload {
+                        MessagePayload::Handshake {
+                            parsed:
+                                HandshakeMessagePayload {
+                                    typ: HandshakeType::ServerHello,
+                                    payload: HandshakePayload::ServerHello(payload),
+                                },
+                            ..
+                        } => {
+                            std::println!("Received ServerHello: {:?}", payload);
 
-                                let suite = self
-                                    .config
-                                    .find_cipher_suite(payload.cipher_suite)
-                                    .unwrap();
+                            let suite = self
+                                .config
+                                .find_cipher_suite(payload.cipher_suite)
+                                .unwrap();
 
-                                let suite = match suite {
-                                    SupportedCipherSuite::Tls12(suite) => suite,
-                                    SupportedCipherSuite::Tls13(_) => todo!(),
-                                };
+                            let mut transcript =
+                                transcript_buffer.start_hash(suite.hash_provider());
 
-                                self.state = CommonState::WaitCert {
-                                    offset: read_bytes,
-                                    suite,
-                                    randoms: ConnectionRandoms::new(
-                                        Random([0u8; 32]),
-                                        payload.random,
-                                    ),
-                                };
-                            }
-                            _ => {
-                                return Err(Error::InvalidMessage(
-                                    InvalidMessage::UnexpectedMessage("expected server hello"),
-                                ));
-                            }
+                            transcript.add_message(&msg);
+
+                            let suite = match suite {
+                                SupportedCipherSuite::Tls12(suite) => suite,
+                                SupportedCipherSuite::Tls13(_) => todo!(),
+                            };
+
+                            self.state = CommonState::WaitCert {
+                                offset: read_bytes,
+                                suite,
+                                randoms: ConnectionRandoms::new(Random([0u8; 32]), payload.random),
+                                transcript,
+                            };
+                        }
+                        _ => {
+                            return Err(Error::InvalidMessage(InvalidMessage::UnexpectedMessage(
+                                "expected server hello",
+                            )));
                         }
                     }
                 }
@@ -186,6 +202,7 @@ impl LlConnectionCommon {
                     offset,
                     suite,
                     randoms,
+                    mut transcript,
                 } => {
                     if incoming_tls[offset..]
                         .iter()
@@ -195,6 +212,7 @@ impl LlConnectionCommon {
                             offset: 0,
                             suite,
                             randoms,
+                            transcript,
                         };
 
                         return Ok(Status {
@@ -209,6 +227,7 @@ impl LlConnectionCommon {
 
                         let msg = Message::try_from(m).unwrap();
 
+                        transcript.add_message(&msg);
                         match msg.payload {
                             MessagePayload::Handshake {
                                 parsed:
@@ -233,6 +252,7 @@ impl LlConnectionCommon {
                                     offset: offset + reader.used(),
                                     suite,
                                     randoms,
+                                    transcript,
                                 };
                             }
                             _ => {
@@ -249,6 +269,7 @@ impl LlConnectionCommon {
                     offset,
                     suite,
                     randoms,
+                    mut transcript,
                 } => {
                     let mut reader = Reader::init(&incoming_tls[offset..]);
                     let m = OpaqueMessage::read(&mut reader)
@@ -256,6 +277,7 @@ impl LlConnectionCommon {
                         .into_plain_message();
 
                     let msg = Message::try_from(m).unwrap();
+                    transcript.add_message(&msg);
 
                     match msg.payload {
                         MessagePayload::Handshake {
@@ -271,6 +293,7 @@ impl LlConnectionCommon {
                                 suite,
                                 randoms,
                                 opaque_kx,
+                                transcript,
                             };
                         }
                         _ => {
@@ -285,6 +308,7 @@ impl LlConnectionCommon {
                     suite,
                     randoms,
                     opaque_kx,
+                    mut transcript,
                 } => {
                     let mut reader = Reader::init(&incoming_tls[offset..]);
                     let m = OpaqueMessage::read(&mut reader)
@@ -292,6 +316,7 @@ impl LlConnectionCommon {
                         .into_plain_message();
 
                     let msg = Message::try_from(m).unwrap();
+                    transcript.add_message(&msg);
 
                     match msg.payload {
                         MessagePayload::Handshake {
@@ -307,6 +332,7 @@ impl LlConnectionCommon {
                                 suite,
                                 randoms,
                                 opaque_kx,
+                                transcript,
                             };
                         }
                         MessagePayload::Handshake {
@@ -329,6 +355,7 @@ impl LlConnectionCommon {
                                 suite,
                                 server_kx,
                                 randoms,
+                                transcript,
                             };
                         }
                         _ => {
@@ -422,6 +449,7 @@ impl LlConnectionCommon {
                 suite,
                 server_kx,
                 randoms,
+                mut transcript,
             } => {
                 let mut rd = Reader::init(&server_kx.kx_params);
                 let ecdh_params = ServerEcdhParams::read(&mut rd).unwrap();
@@ -460,23 +488,28 @@ impl LlConnectionCommon {
                 self.record_layer
                     .prepare_message_decrypter(dec);
                 self.record_layer.start_encrypting();
-
-                self.state = CommonState::SendClientKeyExchange;
-
-                Message {
+                let msg = Message {
                     version: ProtocolVersion::TLSv1_2,
                     payload: MessagePayload::handshake(payload),
-                }
-            }
-            CommonState::WriteChangeCipherSpec => {
-                self.state = CommonState::SendChangeCipherSpec;
+                };
 
-                Message {
+                transcript.add_message(&msg);
+                self.state = CommonState::SendClientKeyExchange { transcript };
+
+                msg
+            }
+            CommonState::WriteChangeCipherSpec { mut transcript } => {
+                let msg = Message {
                     version: ProtocolVersion::TLSv1_2,
                     payload: MessagePayload::ChangeCipherSpec(ChangeCipherSpecPayload {}),
-                }
+                };
+
+                transcript.add_message(&msg);
+                self.state = CommonState::SendChangeCipherSpec { transcript };
+
+                msg
             }
-            CommonState::WriteFinished => {
+            CommonState::WriteFinished { transcript } => {
                 let verify_data_payload = Payload::new(vec![]);
 
                 self.state = CommonState::SendFinished;
@@ -522,11 +555,11 @@ impl LlConnectionCommon {
             CommonState::SendClientHello { transcript_buffer } => {
                 self.state = CommonState::WaitServerHello { transcript_buffer };
             }
-            CommonState::SendClientKeyExchange => {
-                self.state = CommonState::WriteChangeCipherSpec;
+            CommonState::SendClientKeyExchange { transcript } => {
+                self.state = CommonState::WriteChangeCipherSpec { transcript };
             }
-            CommonState::SendChangeCipherSpec => {
-                self.state = CommonState::WriteFinished;
+            CommonState::SendChangeCipherSpec { transcript } => {
+                self.state = CommonState::WriteFinished { transcript };
             }
             CommonState::SendFinished => {
                 todo!()
