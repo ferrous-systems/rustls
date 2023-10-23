@@ -69,15 +69,19 @@ enum CommonState {
         transcript: HandshakeHash,
     },
     SendClientKeyExchange {
+        secrets: ConnectionSecrets,
         transcript: HandshakeHash,
     },
     WriteChangeCipherSpec {
+        secrets: ConnectionSecrets,
         transcript: HandshakeHash,
     },
     SendChangeCipherSpec {
+        secrets: ConnectionSecrets,
         transcript: HandshakeHash,
     },
     WriteFinished {
+        secrets: ConnectionSecrets,
         transcript: HandshakeHash,
     },
     SendFinished,
@@ -468,60 +472,79 @@ impl LlConnectionCommon {
                 ecpoint.encode(&mut buf);
                 let pubkey = Payload::new(buf);
 
-                let payload = HandshakeMessagePayload {
-                    typ: HandshakeType::ClientKeyExchange,
-                    payload: HandshakePayload::ClientKeyExchange(pubkey),
+                let msg = Message {
+                    version: ProtocolVersion::TLSv1_2,
+                    payload: MessagePayload::handshake(HandshakeMessagePayload {
+                        typ: HandshakeType::ClientKeyExchange,
+                        payload: HandshakePayload::ClientKeyExchange(pubkey),
+                    }),
                 };
+
+                transcript.add_message(&msg);
 
                 let secrets = ConnectionSecrets::from_key_exchange(
                     kx,
                     &ecdh_params.public.0,
-                    None,
+                    Some(transcript.get_current_hash()),
                     randoms,
                     suite,
                 )
                 .unwrap();
 
                 let (dec, enc) = secrets.make_cipher_pair(Side::Client);
+
                 self.record_layer
                     .prepare_message_encrypter(enc);
                 self.record_layer
                     .prepare_message_decrypter(dec);
                 self.record_layer.start_encrypting();
-                let msg = Message {
-                    version: ProtocolVersion::TLSv1_2,
-                    payload: MessagePayload::handshake(payload),
-                };
 
-                transcript.add_message(&msg);
-                self.state = CommonState::SendClientKeyExchange { transcript };
+                self.state = CommonState::SendClientKeyExchange {
+                    secrets,
+                    transcript,
+                };
 
                 msg
             }
-            CommonState::WriteChangeCipherSpec { mut transcript } => {
+            CommonState::WriteChangeCipherSpec {
+                secrets,
+                mut transcript,
+            } => {
                 let msg = Message {
                     version: ProtocolVersion::TLSv1_2,
                     payload: MessagePayload::ChangeCipherSpec(ChangeCipherSpecPayload {}),
                 };
 
                 transcript.add_message(&msg);
-                self.state = CommonState::SendChangeCipherSpec { transcript };
+                self.state = CommonState::SendChangeCipherSpec {
+                    secrets,
+                    transcript,
+                };
 
                 msg
             }
-            CommonState::WriteFinished { transcript } => {
-                let verify_data_payload = Payload::new(vec![]);
+            CommonState::WriteFinished {
+                mut transcript,
+                secrets,
+            } => {
+                let vh = transcript.get_current_hash();
+                let verify_data = secrets.client_verify_data(&vh);
+                let verify_data_payload = Payload::new(verify_data);
 
-                self.state = CommonState::SendFinished;
                 is_encrypted = true;
 
-                Message {
+                let msg = Message {
                     version: ProtocolVersion::TLSv1_2,
                     payload: MessagePayload::handshake(HandshakeMessagePayload {
                         typ: HandshakeType::Finished,
                         payload: HandshakePayload::Finished(verify_data_payload),
                     }),
-                }
+                };
+
+                transcript.add_message(&msg);
+                self.state = CommonState::SendFinished;
+
+                msg
             }
             _ => unreachable!(),
         };
@@ -555,11 +578,23 @@ impl LlConnectionCommon {
             CommonState::SendClientHello { transcript_buffer } => {
                 self.state = CommonState::WaitServerHello { transcript_buffer };
             }
-            CommonState::SendClientKeyExchange { transcript } => {
-                self.state = CommonState::WriteChangeCipherSpec { transcript };
+            CommonState::SendClientKeyExchange {
+                secrets,
+                transcript,
+            } => {
+                self.state = CommonState::WriteChangeCipherSpec {
+                    secrets,
+                    transcript,
+                };
             }
-            CommonState::SendChangeCipherSpec { transcript } => {
-                self.state = CommonState::WriteFinished { transcript };
+            CommonState::SendChangeCipherSpec {
+                secrets,
+                transcript,
+            } => {
+                self.state = CommonState::WriteFinished {
+                    secrets,
+                    transcript,
+                };
             }
             CommonState::SendFinished => {
                 todo!()
