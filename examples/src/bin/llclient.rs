@@ -67,7 +67,6 @@ fn main() -> io::Result<()> {
             }
 
             State::AppDataAvailable(records) => {
-                println!("got records");
                 for res in records {
                     let AppDataRecord {
                         discard: _new_discard,
@@ -81,7 +80,6 @@ fn main() -> io::Result<()> {
             }
 
             State::TrafficTransit(mut traffic_transit) => {
-                println!("got traffic_transit");
                 // post-handshake logic
                 let req = b"GET / HTTP/1.0\r\nHost: llclient\r\nConnection: close\r\nAccept-Encoding: identity\r\n\r\n";
                 let len = traffic_transit
