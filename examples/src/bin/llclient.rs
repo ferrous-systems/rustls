@@ -39,7 +39,7 @@ fn main() -> io::Result<()> {
     let mut outgoing_used = 0;
 
     loop {
-        let Status { mut discard, state } = conn
+        let Status { discard, state } = conn
             .process_tls_records(&mut incoming_tls)
             .unwrap();
 
@@ -69,20 +69,31 @@ fn main() -> io::Result<()> {
             }
 
             State::AppDataAvailable(records) => {
+                println!("got records");
                 for res in records {
                     let AppDataRecord {
-                        discard: new_discard,
-                        payload: _,
+                        discard: _new_discard,
+                        payload,
                     } = res.unwrap();
 
-                    discard += new_discard.get();
+                    assert_eq!(payload, b"HTTP/1.0 200 OK\r\nConnection: close\r\n\r\nHello world from rustls tlsserver\r\n");
 
-                    // do app-specific stuff with `payload`
+                    return Ok(());
                 }
             }
 
-            State::TrafficTransit(_) => {
+            State::TrafficTransit(mut traffic_transit) => {
+                println!("got traffic_transit");
                 // post-handshake logic
+                let req = b"GET / HTTP/1.0\r\nHost: llclient\r\nConnection: close\r\nAccept-Encoding: identity\r\n\r\n";
+                let len = traffic_transit
+                    .encrypt(req, outgoing_tls.as_mut_slice())
+                    .unwrap();
+                sock.write_all(&outgoing_tls[..len])
+                    .unwrap();
+
+                let read = sock.read(&mut incoming_tls[incoming_used..])?;
+                incoming_used += read;
             }
         }
 

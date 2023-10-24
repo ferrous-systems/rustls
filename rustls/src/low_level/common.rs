@@ -10,7 +10,7 @@ use std::sync::Arc;
 use crate::check::{inappropriate_handshake_message, inappropriate_message};
 use crate::client::tls12::ServerKxDetails;
 use crate::conn::ConnectionRandoms;
-use crate::crypto::cipher::OpaqueMessage;
+use crate::crypto::cipher::{OpaqueMessage, PlainMessage};
 use crate::hash_hs::{HandshakeHash, HandshakeHashBuffer};
 use crate::internal::record_layer::RecordLayer;
 use crate::msgs::base::{Payload, PayloadU8};
@@ -20,6 +20,7 @@ use crate::msgs::enums::ECPointFormat;
 use crate::msgs::handshake::{
     CertificateStatusRequest, ClientExtension, ServerEcdhParams, ServerKeyExchangePayload,
 };
+use crate::msgs::message::MessageError;
 use crate::tls12::ConnectionSecrets;
 use crate::{
     msgs::{
@@ -32,7 +33,9 @@ use crate::{
     },
     ClientConfig, Error, HandshakeType, ProtocolVersion,
 };
-use crate::{ContentType, ServerName, Side, SupportedCipherSuite, Tls12CipherSuite};
+use crate::{
+    ContentType, InvalidMessage, ServerName, Side, SupportedCipherSuite, Tls12CipherSuite,
+};
 
 #[derive(Debug)]
 enum CommonState {
@@ -168,8 +171,6 @@ impl LlConnectionCommon {
                         HandshakeType::ServerHello,
                         HandshakePayload::ServerHello
                     )?;
-
-                    std::println!("Received ServerHello: {:?}", payload);
 
                     let suite = self
                         .config
@@ -319,7 +320,33 @@ impl LlConnectionCommon {
 
                     self.state = CommonState::HandshakeDone;
                 }
-                CommonState::HandshakeDone => todo!(),
+                state @ CommonState::HandshakeDone => {
+                    self.state = state;
+
+                    let mut reader = Reader::init(&incoming_tls[self.offset..]);
+                    match OpaqueMessage::read(&mut reader) {
+                        Ok(msg) => match msg.typ {
+                            ContentType::ApplicationData => {
+                                return Ok(Status {
+                                    discard: 0,
+                                    state: State::AppDataAvailable(AppDataAvailable {
+                                        incoming_tls: Some(incoming_tls),
+                                        conn: self,
+                                    }),
+                                });
+                            }
+                            content_type => {
+                                panic!("{:?}", content_type);
+                            }
+                        },
+                        Err(_) => {
+                            return Ok(Status {
+                                discard: 0,
+                                state: State::TrafficTransit(TrafficTransit { conn: self }),
+                            });
+                        }
+                    }
+                }
             }
         }
     }
@@ -554,11 +581,23 @@ impl LlConnectionCommon {
     }
 
     fn encrypt_traffic_transit(
-        &self,
-        _application_data: &[u8],
-        _outgoing_tls: &mut [u8],
+        &mut self,
+        application_data: &[u8],
+        outgoing_tls: &mut [u8],
     ) -> Result<usize, EncryptError> {
-        todo!()
+        let msg: PlainMessage = Message {
+            version: ProtocolVersion::TLSv1_2,
+            payload: MessagePayload::ApplicationData(Payload(application_data.to_vec())),
+        }
+        .into();
+
+        let opaque_msg = self
+            .record_layer
+            .encrypt_outgoing(msg.borrow());
+
+        let bytes = opaque_msg.encode();
+        outgoing_tls[..bytes.len()].copy_from_slice(&bytes);
+        Ok(bytes.len())
     }
 
     fn read_message(
@@ -567,8 +606,15 @@ impl LlConnectionCommon {
         transcript_opt: Option<&mut HandshakeHash>,
     ) -> Result<Message, Error> {
         let mut reader = Reader::init(&incoming_tls[self.offset..]);
-        // FIXME: propagate this error
-        let m = OpaqueMessage::read(&mut reader).unwrap();
+        let m = OpaqueMessage::read(&mut reader).map_err(|err| match err {
+            MessageError::TooShortForHeader | MessageError::TooShortForLength => {
+                InvalidMessage::MessageTooShort
+            }
+            MessageError::InvalidEmptyPayload => InvalidMessage::InvalidEmptyPayload,
+            MessageError::MessageTooLarge => InvalidMessage::MessageTooLarge,
+            MessageError::InvalidContentType => InvalidMessage::InvalidContentType,
+            MessageError::UnknownProtocolVersion => InvalidMessage::UnknownProtocolVersion,
+        })?;
         self.offset += reader.used();
 
         let decrypted = self
@@ -580,6 +626,8 @@ impl LlConnectionCommon {
         if let Some(transcript) = transcript_opt {
             transcript.add_message(&msg);
         }
+
+        std::println!("Read {:?}", msg);
 
         Ok(msg)
     }
@@ -625,28 +673,45 @@ pub enum State<'c, 'i> {
 
 /// A decrypted application data record
 #[derive(Debug)]
-pub struct AppDataRecord<'i> {
+pub struct AppDataRecord {
     /// number of the bytes associated to this record that must discarded from the front of
     /// the `incoming_tls` buffer before the next `process_tls_record` call
     pub discard: NonZeroUsize,
 
     /// FIXME: docs
-    pub payload: &'i [u8],
+    pub payload: Vec<u8>,
 }
 
 /// FIXME: docs
 pub struct AppDataAvailable<'c, 'i> {
     /// FIXME: docs
-    _conn: &'c mut LlConnectionCommon,
+    conn: &'c mut LlConnectionCommon,
     /// FIXME: docs
-    _incoming_tls: Option<&'i mut [u8]>,
+    incoming_tls: Option<&'i mut [u8]>,
 }
 
 impl<'c: 'i, 'i> Iterator for AppDataAvailable<'c, 'i> {
-    type Item = Result<AppDataRecord<'i>, Error>;
+    type Item = Result<AppDataRecord, Error>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        todo!()
+        let offset = self.conn.offset;
+
+        match self
+            .conn
+            .read_message(self.incoming_tls.as_deref()?, None)
+        {
+            Ok(msg) => match msg.payload {
+                MessagePayload::ApplicationData(payload) => Some(Ok(AppDataRecord {
+                    discard: self.conn.offset.try_into().unwrap(),
+                    payload: payload.0,
+                })),
+                _ => {
+                    self.conn.offset = offset;
+                    None
+                }
+            },
+            Err(err) => Some(Err(err)),
+        }
     }
 }
 
