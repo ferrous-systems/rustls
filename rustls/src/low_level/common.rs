@@ -37,56 +37,68 @@ use crate::{
     ContentType, InvalidMessage, ServerName, Side, SupportedCipherSuite, Tls12CipherSuite,
 };
 
-enum CommonState {
-    Unreachable,
-    StartHandshake,
-    SendClientHello {
+enum ExpectState {
+    ServerHello {
         transcript_buffer: HandshakeHashBuffer,
     },
-    WaitServerHello {
-        transcript_buffer: HandshakeHashBuffer,
-    },
-    WaitCert {
+    Certificate {
         suite: &'static Tls12CipherSuite,
         randoms: ConnectionRandoms,
         transcript: HandshakeHash,
     },
-    WaitServerKeyExchange {
+    ServerKeyExchange {
         suite: &'static Tls12CipherSuite,
         randoms: ConnectionRandoms,
         transcript: HandshakeHash,
     },
-    WaitServerHelloDone {
+    ServerHelloDone {
         suite: &'static Tls12CipherSuite,
         opaque_kx: ServerKeyExchangePayload,
         randoms: ConnectionRandoms,
         transcript: HandshakeHash,
     },
-    WriteClientKeyExchange {
+    ChangeCipherSpec,
+    Finished,
+}
+
+enum WriteState {
+    ClientHello,
+    ClientKeyExchange {
         suite: &'static Tls12CipherSuite,
         server_kx: ServerKxDetails,
         randoms: ConnectionRandoms,
         transcript: HandshakeHash,
     },
-    SendClientKeyExchange {
+    ChangeCipherSpec {
         secrets: ConnectionSecrets,
         transcript: HandshakeHash,
     },
-    WriteChangeCipherSpec {
+    Finished {
         secrets: ConnectionSecrets,
         transcript: HandshakeHash,
     },
-    SendChangeCipherSpec {
+}
+
+enum SendState {
+    ClientHello {
+        transcript_buffer: HandshakeHashBuffer,
+    },
+    ClientKeyExchange {
         secrets: ConnectionSecrets,
         transcript: HandshakeHash,
     },
-    WriteFinished {
+    ChangeCipherSpec {
         secrets: ConnectionSecrets,
         transcript: HandshakeHash,
     },
-    SendFinished,
-    WaitChangeCipherSpec,
-    WaitFinished,
+    Finished,
+}
+
+enum CommonState {
+    Unreachable,
+    Expect(ExpectState),
+    Write(WriteState),
+    Send(SendState),
     HandshakeDone,
 }
 
@@ -111,7 +123,7 @@ impl LlConnectionCommon {
         Self {
             config,
             name,
-            state: CommonState::StartHandshake,
+            state: CommonState::Write(WriteState::ClientHello),
             record_layer: RecordLayer::new(),
             offset: 0,
         }
@@ -125,33 +137,21 @@ impl LlConnectionCommon {
         loop {
             match self.state.take() {
                 CommonState::Unreachable => unreachable!(),
-                state @ (CommonState::StartHandshake
-                | CommonState::WriteClientKeyExchange { .. }
-                | CommonState::WriteChangeCipherSpec { .. }
-                | CommonState::WriteFinished { .. }) => {
+                state @ CommonState::Write(_) => {
                     self.state = state;
                     return Ok(Status {
                         discard: 0,
                         state: State::MustEncryptTlsData(MustEncryptTlsData { conn: self }),
                     });
                 }
-                state @ (CommonState::SendClientHello { .. }
-                | CommonState::SendClientKeyExchange { .. }
-                | CommonState::SendChangeCipherSpec { .. }
-                | CommonState::SendFinished) => {
+                state @ CommonState::Send(_) => {
                     self.state = state;
-
                     return Ok(Status {
                         discard: 0,
                         state: State::MustTransmitTlsData(MustTransmitTlsData { conn: self }),
                     });
                 }
-                state @ (CommonState::WaitServerHello { .. }
-                | CommonState::WaitCert { .. }
-                | CommonState::WaitServerKeyExchange { .. }
-                | CommonState::WaitServerHelloDone { .. }
-                | CommonState::WaitChangeCipherSpec
-                | CommonState::WaitFinished)
+                state @ CommonState::Expect(_)
                     if incoming_tls[self.offset..]
                         .iter()
                         .all(|&b| b == 0) =>
@@ -162,163 +162,165 @@ impl LlConnectionCommon {
                         state: State::NeedsMoreTlsData { num_bytes: None },
                     });
                 }
-                CommonState::WaitServerHello { transcript_buffer } => {
-                    let msg = self.read_message(incoming_tls, None)?;
+                CommonState::Expect(expect_state) => match expect_state {
+                    ExpectState::ServerHello { transcript_buffer } => {
+                        let msg = self.read_message(incoming_tls, None)?;
 
-                    let payload = require_handshake_msg!(
-                        msg,
-                        HandshakeType::ServerHello,
-                        HandshakePayload::ServerHello
-                    )?;
+                        let payload = require_handshake_msg!(
+                            msg,
+                            HandshakeType::ServerHello,
+                            HandshakePayload::ServerHello
+                        )?;
 
-                    let suite = self
-                        .config
-                        .find_cipher_suite(payload.cipher_suite)
-                        .unwrap();
+                        let suite = self
+                            .config
+                            .find_cipher_suite(payload.cipher_suite)
+                            .unwrap();
 
-                    let mut transcript = transcript_buffer.start_hash(suite.hash_provider());
+                        let mut transcript = transcript_buffer.start_hash(suite.hash_provider());
 
-                    transcript.add_message(&msg);
+                        transcript.add_message(&msg);
 
-                    let suite = match suite {
-                        SupportedCipherSuite::Tls12(suite) => suite,
-                        SupportedCipherSuite::Tls13(_) => todo!(),
-                    };
+                        let suite = match suite {
+                            SupportedCipherSuite::Tls12(suite) => suite,
+                            SupportedCipherSuite::Tls13(_) => todo!(),
+                        };
 
-                    self.state = CommonState::WaitCert {
-                        suite,
-                        randoms: ConnectionRandoms::new(Random([0u8; 32]), payload.random),
-                        transcript,
-                    };
-                }
-                CommonState::WaitCert {
-                    suite,
-                    randoms,
-                    mut transcript,
-                } => {
-                    let msg = self.read_message(incoming_tls, Some(&mut transcript))?;
-
-                    let payload = require_handshake_msg_move!(
-                        msg,
-                        HandshakeType::Certificate,
-                        HandshakePayload::Certificate
-                    )?;
-
-                    self.config
-                        .verifier
-                        .verify_server_cert(&payload[0], &[], &self.name, &[], UnixTime::now())
-                        .unwrap();
-
-                    self.state = CommonState::WaitServerKeyExchange {
+                        self.state = CommonState::Expect(ExpectState::Certificate {
+                            suite,
+                            randoms: ConnectionRandoms::new(Random([0u8; 32]), payload.random),
+                            transcript,
+                        });
+                    }
+                    ExpectState::Certificate {
                         suite,
                         randoms,
-                        transcript,
-                    };
-                }
-                CommonState::WaitServerKeyExchange {
-                    suite,
-                    randoms,
-                    mut transcript,
-                } => {
-                    let msg = self.read_message(incoming_tls, Some(&mut transcript))?;
+                        mut transcript,
+                    } => {
+                        let msg = self.read_message(incoming_tls, Some(&mut transcript))?;
 
-                    let opaque_kx = require_handshake_msg_move!(
-                        msg,
-                        HandshakeType::ServerKeyExchange,
-                        HandshakePayload::ServerKeyExchange
-                    )?;
+                        let payload = require_handshake_msg_move!(
+                            msg,
+                            HandshakeType::Certificate,
+                            HandshakePayload::Certificate
+                        )?;
 
-                    self.state = CommonState::WaitServerHelloDone {
+                        self.config
+                            .verifier
+                            .verify_server_cert(&payload[0], &[], &self.name, &[], UnixTime::now())
+                            .unwrap();
+
+                        self.state = CommonState::Expect(ExpectState::ServerKeyExchange {
+                            suite,
+                            randoms,
+                            transcript,
+                        });
+                    }
+                    ExpectState::ServerKeyExchange {
+                        suite,
+                        randoms,
+                        mut transcript,
+                    } => {
+                        let msg = self.read_message(incoming_tls, Some(&mut transcript))?;
+
+                        let opaque_kx = require_handshake_msg_move!(
+                            msg,
+                            HandshakeType::ServerKeyExchange,
+                            HandshakePayload::ServerKeyExchange
+                        )?;
+
+                        self.state = CommonState::Expect(ExpectState::ServerHelloDone {
+                            suite,
+                            randoms,
+                            opaque_kx,
+                            transcript,
+                        });
+                    }
+                    ExpectState::ServerHelloDone {
                         suite,
                         randoms,
                         opaque_kx,
-                        transcript,
-                    };
-                }
-                CommonState::WaitServerHelloDone {
-                    suite,
-                    randoms,
-                    opaque_kx,
-                    mut transcript,
-                } => {
-                    let msg = self.read_message(incoming_tls, Some(&mut transcript))?;
-                    match msg.payload {
-                        MessagePayload::Handshake {
-                            parsed:
-                                HandshakeMessagePayload {
-                                    typ: HandshakeType::CertificateRequest,
-                                    payload: HandshakePayload::CertificateRequest(_),
-                                },
-                            ..
-                        } => {
-                            self.state = CommonState::WaitServerHelloDone {
-                                suite,
-                                randoms,
-                                opaque_kx,
-                                transcript,
-                            };
-                        }
-                        MessagePayload::Handshake {
-                            parsed:
-                                HandshakeMessagePayload {
-                                    typ: HandshakeType::ServerHelloDone,
-                                    payload: HandshakePayload::ServerHelloDone,
-                                },
-                            ..
-                        } => {
-                            let ecdhe = opaque_kx
-                                .unwrap_given_kxa(suite.kx)
-                                .unwrap();
+                        mut transcript,
+                    } => {
+                        let msg = self.read_message(incoming_tls, Some(&mut transcript))?;
+                        match msg.payload {
+                            MessagePayload::Handshake {
+                                parsed:
+                                    HandshakeMessagePayload {
+                                        typ: HandshakeType::CertificateRequest,
+                                        payload: HandshakePayload::CertificateRequest(_),
+                                    },
+                                ..
+                            } => {
+                                self.state = CommonState::Expect(ExpectState::ServerHelloDone {
+                                    suite,
+                                    randoms,
+                                    opaque_kx,
+                                    transcript,
+                                });
+                            }
+                            MessagePayload::Handshake {
+                                parsed:
+                                    HandshakeMessagePayload {
+                                        typ: HandshakeType::ServerHelloDone,
+                                        payload: HandshakePayload::ServerHelloDone,
+                                    },
+                                ..
+                            } => {
+                                let ecdhe = opaque_kx
+                                    .unwrap_given_kxa(suite.kx)
+                                    .unwrap();
 
-                            let mut kx_params = Vec::new();
-                            ecdhe.params.encode(&mut kx_params);
-                            let server_kx = ServerKxDetails::new(kx_params, ecdhe.dss);
+                                let mut kx_params = Vec::new();
+                                ecdhe.params.encode(&mut kx_params);
+                                let server_kx = ServerKxDetails::new(kx_params, ecdhe.dss);
 
-                            self.state = CommonState::WriteClientKeyExchange {
-                                suite,
-                                server_kx,
-                                randoms,
-                                transcript,
-                            };
-                        }
-                        payload => {
-                            return Err(inappropriate_handshake_message(
-                                &payload,
-                                &[ContentType::Handshake],
-                                &[
-                                    HandshakeType::ServerHelloDone,
-                                    HandshakeType::CertificateRequest,
-                                ],
-                            ));
+                                self.state = CommonState::Write(WriteState::ClientKeyExchange {
+                                    suite,
+                                    server_kx,
+                                    randoms,
+                                    transcript,
+                                });
+                            }
+                            payload => {
+                                return Err(inappropriate_handshake_message(
+                                    &payload,
+                                    &[ContentType::Handshake],
+                                    &[
+                                        HandshakeType::ServerHelloDone,
+                                        HandshakeType::CertificateRequest,
+                                    ],
+                                ));
+                            }
                         }
                     }
-                }
-                CommonState::WaitChangeCipherSpec => {
-                    let msg = self.read_message(incoming_tls, None)?;
-                    match msg.payload {
-                        MessagePayload::ChangeCipherSpec(_) => {
-                            self.record_layer.start_decrypting();
-                            self.state = CommonState::WaitFinished;
-                        }
-                        payload => {
-                            return Err(inappropriate_message(
-                                &payload,
-                                &[ContentType::ChangeCipherSpec],
-                            ));
+                    ExpectState::ChangeCipherSpec => {
+                        let msg = self.read_message(incoming_tls, None)?;
+                        match msg.payload {
+                            MessagePayload::ChangeCipherSpec(_) => {
+                                self.record_layer.start_decrypting();
+                                self.state = CommonState::Expect(ExpectState::Finished);
+                            }
+                            payload => {
+                                return Err(inappropriate_message(
+                                    &payload,
+                                    &[ContentType::ChangeCipherSpec],
+                                ));
+                            }
                         }
                     }
-                }
-                CommonState::WaitFinished => {
-                    let msg = self.read_message(incoming_tls, None)?;
+                    ExpectState::Finished => {
+                        let msg = self.read_message(incoming_tls, None)?;
 
-                    let _ = require_handshake_msg!(
-                        msg,
-                        HandshakeType::Finished,
-                        HandshakePayload::Finished
-                    )?;
+                        let _ = require_handshake_msg!(
+                            msg,
+                            HandshakeType::Finished,
+                            HandshakePayload::Finished
+                        )?;
 
-                    self.state = CommonState::HandshakeDone;
-                }
+                        self.state = CommonState::HandshakeDone;
+                    }
+                },
                 state @ CommonState::HandshakeDone => {
                     self.state = state;
 
@@ -355,161 +357,162 @@ impl LlConnectionCommon {
         let mut is_encrypted = false;
 
         let msg = match self.state.take() {
-            CommonState::StartHandshake => {
-                let support_tls12 = self
-                    .config
-                    .supports_version(ProtocolVersion::TLSv1_2);
+            CommonState::Write(write_state) => match write_state {
+                WriteState::ClientHello => {
+                    let support_tls12 = self
+                        .config
+                        .supports_version(ProtocolVersion::TLSv1_2);
 
-                let mut supported_versions = Vec::new();
-                if support_tls12 {
-                    supported_versions.push(ProtocolVersion::TLSv1_2);
+                    let mut supported_versions = Vec::new();
+                    if support_tls12 {
+                        supported_versions.push(ProtocolVersion::TLSv1_2);
+                    }
+
+                    let payload = HandshakeMessagePayload {
+                        typ: HandshakeType::ClientHello,
+                        payload: HandshakePayload::ClientHello(ClientHelloPayload {
+                            client_version: ProtocolVersion::TLSv1_2,
+                            random: Random([0u8; 32]),
+                            session_id: SessionId::empty(),
+                            cipher_suites: self
+                                .config
+                                .cipher_suites
+                                .iter()
+                                .map(|cs| cs.suite())
+                                .collect(),
+                            compression_methods: vec![Compression::Null],
+                            extensions: vec![
+                                ClientExtension::SupportedVersions(supported_versions),
+                                ClientExtension::EcPointFormats(ECPointFormat::SUPPORTED.to_vec()),
+                                ClientExtension::NamedGroups(
+                                    self.config
+                                        .kx_groups
+                                        .iter()
+                                        .map(|skxg| skxg.name())
+                                        .collect(),
+                                ),
+                                ClientExtension::SignatureAlgorithms(
+                                    self.config
+                                        .verifier
+                                        .supported_verify_schemes(),
+                                ),
+                                ClientExtension::ExtendedMasterSecretRequest,
+                                ClientExtension::CertificateStatusRequest(
+                                    CertificateStatusRequest::build_ocsp(),
+                                ),
+                            ],
+                        }),
+                    };
+
+                    let msg = Message {
+                        version: ProtocolVersion::TLSv1_0,
+                        payload: MessagePayload::handshake(payload),
+                    };
+
+                    let mut transcript_buffer = HandshakeHashBuffer::new();
+                    transcript_buffer.add_message(&msg);
+                    self.state = CommonState::Send(SendState::ClientHello { transcript_buffer });
+
+                    msg
                 }
+                WriteState::ClientKeyExchange {
+                    suite,
+                    server_kx,
+                    randoms,
+                    mut transcript,
+                } => {
+                    let mut rd = Reader::init(&server_kx.kx_params);
+                    let ecdh_params = ServerEcdhParams::read(&mut rd).unwrap();
+                    assert!(!rd.any_left());
 
-                let payload = HandshakeMessagePayload {
-                    typ: HandshakeType::ClientHello,
-                    payload: HandshakePayload::ClientHello(ClientHelloPayload {
-                        client_version: ProtocolVersion::TLSv1_2,
-                        random: Random([0u8; 32]),
-                        session_id: SessionId::empty(),
-                        cipher_suites: self
-                            .config
-                            .cipher_suites
-                            .iter()
-                            .map(|cs| cs.suite())
-                            .collect(),
-                        compression_methods: vec![Compression::Null],
-                        extensions: vec![
-                            ClientExtension::SupportedVersions(supported_versions),
-                            ClientExtension::EcPointFormats(ECPointFormat::SUPPORTED.to_vec()),
-                            ClientExtension::NamedGroups(
-                                self.config
-                                    .kx_groups
-                                    .iter()
-                                    .map(|skxg| skxg.name())
-                                    .collect(),
-                            ),
-                            ClientExtension::SignatureAlgorithms(
-                                self.config
-                                    .verifier
-                                    .supported_verify_schemes(),
-                            ),
-                            ClientExtension::ExtendedMasterSecretRequest,
-                            ClientExtension::CertificateStatusRequest(
-                                CertificateStatusRequest::build_ocsp(),
-                            ),
-                        ],
-                    }),
-                };
+                    let named_group = ecdh_params.curve_params.named_group;
+                    let skxg = self
+                        .config
+                        .find_kx_group(named_group)
+                        .unwrap();
 
-                let msg = Message {
-                    version: ProtocolVersion::TLSv1_0,
-                    payload: MessagePayload::handshake(payload),
-                };
+                    let kx = skxg.start().unwrap();
 
-                let mut transcript_buffer = HandshakeHashBuffer::new();
-                transcript_buffer.add_message(&msg);
-                self.state = CommonState::SendClientHello { transcript_buffer };
+                    let mut buf = Vec::new();
+                    let ecpoint = PayloadU8::new(Vec::from(kx.pub_key()));
+                    ecpoint.encode(&mut buf);
+                    let pubkey = Payload::new(buf);
 
-                msg
-            }
+                    let msg = Message {
+                        version: ProtocolVersion::TLSv1_2,
+                        payload: MessagePayload::handshake(HandshakeMessagePayload {
+                            typ: HandshakeType::ClientKeyExchange,
+                            payload: HandshakePayload::ClientKeyExchange(pubkey),
+                        }),
+                    };
 
-            CommonState::WriteClientKeyExchange {
-                suite,
-                server_kx,
-                randoms,
-                mut transcript,
-            } => {
-                let mut rd = Reader::init(&server_kx.kx_params);
-                let ecdh_params = ServerEcdhParams::read(&mut rd).unwrap();
-                assert!(!rd.any_left());
+                    transcript.add_message(&msg);
 
-                let named_group = ecdh_params.curve_params.named_group;
-                let skxg = self
-                    .config
-                    .find_kx_group(named_group)
+                    let secrets = ConnectionSecrets::from_key_exchange(
+                        kx,
+                        &ecdh_params.public.0,
+                        Some(transcript.get_current_hash()),
+                        randoms,
+                        suite,
+                    )
                     .unwrap();
 
-                let kx = skxg.start().unwrap();
+                    let (dec, enc) = secrets.make_cipher_pair(Side::Client);
 
-                let mut buf = Vec::new();
-                let ecpoint = PayloadU8::new(Vec::from(kx.pub_key()));
-                ecpoint.encode(&mut buf);
-                let pubkey = Payload::new(buf);
+                    self.record_layer
+                        .prepare_message_encrypter(enc);
+                    self.record_layer
+                        .prepare_message_decrypter(dec);
+                    self.record_layer.start_encrypting();
 
-                let msg = Message {
-                    version: ProtocolVersion::TLSv1_2,
-                    payload: MessagePayload::handshake(HandshakeMessagePayload {
-                        typ: HandshakeType::ClientKeyExchange,
-                        payload: HandshakePayload::ClientKeyExchange(pubkey),
-                    }),
-                };
+                    self.state = CommonState::Send(SendState::ClientKeyExchange {
+                        secrets,
+                        transcript,
+                    });
 
-                transcript.add_message(&msg);
-
-                let secrets = ConnectionSecrets::from_key_exchange(
-                    kx,
-                    &ecdh_params.public.0,
-                    Some(transcript.get_current_hash()),
-                    randoms,
-                    suite,
-                )
-                .unwrap();
-
-                let (dec, enc) = secrets.make_cipher_pair(Side::Client);
-
-                self.record_layer
-                    .prepare_message_encrypter(enc);
-                self.record_layer
-                    .prepare_message_decrypter(dec);
-                self.record_layer.start_encrypting();
-
-                self.state = CommonState::SendClientKeyExchange {
+                    msg
+                }
+                WriteState::ChangeCipherSpec {
                     secrets,
-                    transcript,
-                };
+                    mut transcript,
+                } => {
+                    let msg = Message {
+                        version: ProtocolVersion::TLSv1_2,
+                        payload: MessagePayload::ChangeCipherSpec(ChangeCipherSpecPayload {}),
+                    };
 
-                msg
-            }
-            CommonState::WriteChangeCipherSpec {
-                secrets,
-                mut transcript,
-            } => {
-                let msg = Message {
-                    version: ProtocolVersion::TLSv1_2,
-                    payload: MessagePayload::ChangeCipherSpec(ChangeCipherSpecPayload {}),
-                };
+                    transcript.add_message(&msg);
+                    self.state = CommonState::Send(SendState::ChangeCipherSpec {
+                        secrets,
+                        transcript,
+                    });
 
-                transcript.add_message(&msg);
-                self.state = CommonState::SendChangeCipherSpec {
+                    msg
+                }
+                WriteState::Finished {
+                    mut transcript,
                     secrets,
-                    transcript,
-                };
+                } => {
+                    let vh = transcript.get_current_hash();
+                    let verify_data = secrets.client_verify_data(&vh);
+                    let verify_data_payload = Payload::new(verify_data);
 
-                msg
-            }
-            CommonState::WriteFinished {
-                mut transcript,
-                secrets,
-            } => {
-                let vh = transcript.get_current_hash();
-                let verify_data = secrets.client_verify_data(&vh);
-                let verify_data_payload = Payload::new(verify_data);
+                    is_encrypted = true;
 
-                is_encrypted = true;
+                    let msg = Message {
+                        version: ProtocolVersion::TLSv1_2,
+                        payload: MessagePayload::handshake(HandshakeMessagePayload {
+                            typ: HandshakeType::Finished,
+                            payload: HandshakePayload::Finished(verify_data_payload),
+                        }),
+                    };
 
-                let msg = Message {
-                    version: ProtocolVersion::TLSv1_2,
-                    payload: MessagePayload::handshake(HandshakeMessagePayload {
-                        typ: HandshakeType::Finished,
-                        payload: HandshakePayload::Finished(verify_data_payload),
-                    }),
-                };
+                    transcript.add_message(&msg);
+                    self.state = CommonState::Send(SendState::Finished);
 
-                transcript.add_message(&msg);
-                self.state = CommonState::SendFinished;
-
-                msg
-            }
+                    msg
+                }
+            },
             _ => unreachable!(),
         };
 
@@ -538,33 +541,29 @@ impl LlConnectionCommon {
     }
 
     fn tls_data_done(&mut self) {
-        match self.state.take() {
-            CommonState::SendClientHello { transcript_buffer } => {
-                self.state = CommonState::WaitServerHello { transcript_buffer };
-            }
-            CommonState::SendClientKeyExchange {
-                secrets,
-                transcript,
-            } => {
-                self.state = CommonState::WriteChangeCipherSpec {
+        self.state = match self.state.take() {
+            CommonState::Send(send_state) => match send_state {
+                SendState::ClientHello { transcript_buffer } => {
+                    CommonState::Expect(ExpectState::ServerHello { transcript_buffer })
+                }
+                SendState::ClientKeyExchange {
                     secrets,
                     transcript,
-                };
-            }
-            CommonState::SendChangeCipherSpec {
-                secrets,
-                transcript,
-            } => {
-                self.state = CommonState::WriteFinished {
+                } => CommonState::Write(WriteState::ChangeCipherSpec {
                     secrets,
                     transcript,
-                };
-            }
-            CommonState::SendFinished => {
-                self.state = CommonState::WaitChangeCipherSpec;
-            }
+                }),
+                SendState::ChangeCipherSpec {
+                    secrets,
+                    transcript,
+                } => CommonState::Write(WriteState::Finished {
+                    secrets,
+                    transcript,
+                }),
+                SendState::Finished => CommonState::Expect(ExpectState::ChangeCipherSpec),
+            },
             _ => unreachable!(),
-        }
+        };
     }
 
     fn encrypt_traffic_transit(
