@@ -7,6 +7,7 @@ use alloc::vec::Vec;
 use pki_types::UnixTime;
 use std::sync::Arc;
 
+use crate::check::{inappropriate_handshake_message, inappropriate_message};
 use crate::client::tls12::ServerKxDetails;
 use crate::conn::ConnectionRandoms;
 use crate::crypto::cipher::OpaqueMessage;
@@ -31,7 +32,7 @@ use crate::{
     },
     ClientConfig, Error, HandshakeType, ProtocolVersion,
 };
-use crate::{InvalidMessage, ServerName, Side, SupportedCipherSuite, Tls12CipherSuite};
+use crate::{ContentType, ServerName, Side, SupportedCipherSuite, Tls12CipherSuite};
 
 #[derive(Debug)]
 enum CommonState {
@@ -163,44 +164,34 @@ impl LlConnectionCommon {
                 }
                 CommonState::WaitServerHello { transcript_buffer } => {
                     let msg = self.read_message(incoming_tls, None)?;
-                    match &msg.payload {
-                        MessagePayload::Handshake {
-                            parsed:
-                                HandshakeMessagePayload {
-                                    typ: HandshakeType::ServerHello,
-                                    payload: HandshakePayload::ServerHello(payload),
-                                },
-                            ..
-                        } => {
-                            std::println!("Received ServerHello: {:?}", payload);
 
-                            let suite = self
-                                .config
-                                .find_cipher_suite(payload.cipher_suite)
-                                .unwrap();
+                    let payload = require_handshake_msg!(
+                        msg,
+                        HandshakeType::ServerHello,
+                        HandshakePayload::ServerHello
+                    )?;
 
-                            let mut transcript =
-                                transcript_buffer.start_hash(suite.hash_provider());
+                    std::println!("Received ServerHello: {:?}", payload);
 
-                            transcript.add_message(&msg);
+                    let suite = self
+                        .config
+                        .find_cipher_suite(payload.cipher_suite)
+                        .unwrap();
 
-                            let suite = match suite {
-                                SupportedCipherSuite::Tls12(suite) => suite,
-                                SupportedCipherSuite::Tls13(_) => todo!(),
-                            };
+                    let mut transcript = transcript_buffer.start_hash(suite.hash_provider());
 
-                            self.state = CommonState::WaitCert {
-                                suite,
-                                randoms: ConnectionRandoms::new(Random([0u8; 32]), payload.random),
-                                transcript,
-                            };
-                        }
-                        _ => {
-                            return Err(Error::InvalidMessage(InvalidMessage::UnexpectedMessage(
-                                "expected server hello",
-                            )));
-                        }
-                    }
+                    transcript.add_message(&msg);
+
+                    let suite = match suite {
+                        SupportedCipherSuite::Tls12(suite) => suite,
+                        SupportedCipherSuite::Tls13(_) => todo!(),
+                    };
+
+                    self.state = CommonState::WaitCert {
+                        suite,
+                        randoms: ConnectionRandoms::new(Random([0u8; 32]), payload.random),
+                        transcript,
+                    };
                 }
                 CommonState::WaitCert {
                     suite,
@@ -208,38 +199,23 @@ impl LlConnectionCommon {
                     mut transcript,
                 } => {
                     let msg = self.read_message(incoming_tls, Some(&mut transcript))?;
-                    match msg.payload {
-                        MessagePayload::Handshake {
-                            parsed:
-                                HandshakeMessagePayload {
-                                    typ: HandshakeType::Certificate,
-                                    payload: HandshakePayload::Certificate(payload),
-                                },
-                            ..
-                        } => {
-                            self.config
-                                .verifier
-                                .verify_server_cert(
-                                    &payload[0],
-                                    &[],
-                                    &self.name,
-                                    &[],
-                                    UnixTime::now(),
-                                )
-                                .unwrap();
 
-                            self.state = CommonState::WaitServerKeyExchange {
-                                suite,
-                                randoms,
-                                transcript,
-                            };
-                        }
-                        _ => {
-                            return Err(Error::InvalidMessage(InvalidMessage::UnexpectedMessage(
-                                "expected certificate request",
-                            )));
-                        }
-                    }
+                    let payload = require_handshake_msg_move!(
+                        msg,
+                        HandshakeType::Certificate,
+                        HandshakePayload::Certificate
+                    )?;
+
+                    self.config
+                        .verifier
+                        .verify_server_cert(&payload[0], &[], &self.name, &[], UnixTime::now())
+                        .unwrap();
+
+                    self.state = CommonState::WaitServerKeyExchange {
+                        suite,
+                        randoms,
+                        transcript,
+                    };
                 }
                 CommonState::WaitServerKeyExchange {
                     suite,
@@ -247,28 +223,19 @@ impl LlConnectionCommon {
                     mut transcript,
                 } => {
                     let msg = self.read_message(incoming_tls, Some(&mut transcript))?;
-                    match msg.payload {
-                        MessagePayload::Handshake {
-                            parsed:
-                                HandshakeMessagePayload {
-                                    typ: HandshakeType::ServerKeyExchange,
-                                    payload: HandshakePayload::ServerKeyExchange(opaque_kx),
-                                },
-                            ..
-                        } => {
-                            self.state = CommonState::WaitServerHelloDone {
-                                suite,
-                                randoms,
-                                opaque_kx,
-                                transcript,
-                            };
-                        }
-                        _ => {
-                            return Err(Error::InvalidMessage(InvalidMessage::UnexpectedMessage(
-                                "expected server key exchange",
-                            )));
-                        }
-                    }
+
+                    let opaque_kx = require_handshake_msg_move!(
+                        msg,
+                        HandshakeType::ServerKeyExchange,
+                        HandshakePayload::ServerKeyExchange
+                    )?;
+
+                    self.state = CommonState::WaitServerHelloDone {
+                        suite,
+                        randoms,
+                        opaque_kx,
+                        transcript,
+                    };
                 }
                 CommonState::WaitServerHelloDone {
                     suite,
@@ -316,11 +283,15 @@ impl LlConnectionCommon {
                                 transcript,
                             };
                         }
-                        _ => {
-                            std::dbg!(msg.payload);
-                            return Err(Error::InvalidMessage(InvalidMessage::UnexpectedMessage(
-                                "expected server hello done",
-                            )));
+                        payload => {
+                            return Err(inappropriate_handshake_message(
+                                &payload,
+                                &[ContentType::Handshake],
+                                &[
+                                    HandshakeType::ServerHelloDone,
+                                    HandshakeType::CertificateRequest,
+                                ],
+                            ));
                         }
                     }
                 }
@@ -331,34 +302,24 @@ impl LlConnectionCommon {
                             self.record_layer.start_decrypting();
                             self.state = CommonState::WaitFinished;
                         }
-                        _ => {
-                            std::dbg!(msg.payload);
-                            return Err(Error::InvalidMessage(InvalidMessage::UnexpectedMessage(
-                                "expected change cipher spec",
-                            )));
+                        payload => {
+                            return Err(inappropriate_message(
+                                &payload,
+                                &[ContentType::ChangeCipherSpec],
+                            ));
                         }
                     }
                 }
                 CommonState::WaitFinished => {
                     let msg = self.read_message(incoming_tls, None)?;
-                    match msg.payload {
-                        MessagePayload::Handshake {
-                            parsed:
-                                HandshakeMessagePayload {
-                                    typ: HandshakeType::Finished,
-                                    payload: HandshakePayload::Finished(_),
-                                },
-                            ..
-                        } => {
-                            self.state = CommonState::HandshakeDone;
-                        }
-                        _ => {
-                            std::dbg!(msg.payload);
-                            return Err(Error::InvalidMessage(InvalidMessage::UnexpectedMessage(
-                                "expected finished",
-                            )));
-                        }
-                    }
+
+                    let _ = require_handshake_msg!(
+                        msg,
+                        HandshakeType::Finished,
+                        HandshakePayload::Finished
+                    )?;
+
+                    self.state = CommonState::HandshakeDone;
                 }
                 CommonState::HandshakeDone => todo!(),
             }
