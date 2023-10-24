@@ -162,8 +162,7 @@ impl LlConnectionCommon {
                     });
                 }
                 CommonState::WaitServerHello { transcript_buffer } => {
-                    let msg = self.read_message(incoming_tls)?;
-
+                    let msg = self.read_message(incoming_tls, None)?;
                     match &msg.payload {
                         MessagePayload::Handshake {
                             parsed:
@@ -208,9 +207,7 @@ impl LlConnectionCommon {
                     randoms,
                     mut transcript,
                 } => {
-                    let msg = self.read_message(incoming_tls)?;
-
-                    transcript.add_message(&msg);
+                    let msg = self.read_message(incoming_tls, Some(&mut transcript))?;
                     match msg.payload {
                         MessagePayload::Handshake {
                             parsed:
@@ -249,9 +246,7 @@ impl LlConnectionCommon {
                     randoms,
                     mut transcript,
                 } => {
-                    let msg = self.read_message(incoming_tls)?;
-                    transcript.add_message(&msg);
-
+                    let msg = self.read_message(incoming_tls, Some(&mut transcript))?;
                     match msg.payload {
                         MessagePayload::Handshake {
                             parsed:
@@ -281,9 +276,7 @@ impl LlConnectionCommon {
                     opaque_kx,
                     mut transcript,
                 } => {
-                    let msg = self.read_message(incoming_tls)?;
-                    transcript.add_message(&msg);
-
+                    let msg = self.read_message(incoming_tls, Some(&mut transcript))?;
                     match msg.payload {
                         MessagePayload::Handshake {
                             parsed:
@@ -332,8 +325,7 @@ impl LlConnectionCommon {
                     }
                 }
                 CommonState::WaitChangeCipherSpec => {
-                    let msg = self.read_message(incoming_tls)?;
-
+                    let msg = self.read_message(incoming_tls, None)?;
                     match msg.payload {
                         MessagePayload::ChangeCipherSpec(_) => {
                             self.record_layer.start_decrypting();
@@ -348,8 +340,7 @@ impl LlConnectionCommon {
                     }
                 }
                 CommonState::WaitFinished => {
-                    let msg = self.read_message(incoming_tls)?;
-
+                    let msg = self.read_message(incoming_tls, None)?;
                     match msg.payload {
                         MessagePayload::Handshake {
                             parsed:
@@ -611,7 +602,11 @@ impl LlConnectionCommon {
         todo!()
     }
 
-    fn read_message(&mut self, incoming_tls: &[u8]) -> Result<Message, Error> {
+    fn read_message(
+        &mut self,
+        incoming_tls: &[u8],
+        transcript_opt: Option<&mut HandshakeHash>,
+    ) -> Result<Message, Error> {
         let mut reader = Reader::init(&incoming_tls[self.offset..]);
         // FIXME: propagate this error
         let m = OpaqueMessage::read(&mut reader).unwrap();
@@ -622,7 +617,12 @@ impl LlConnectionCommon {
             .decrypt_incoming(m)?
             .expect("we don't support early data yet");
 
-        decrypted.plaintext.try_into()
+        let msg = decrypted.plaintext.try_into()?;
+        if let Some(transcript) = transcript_opt {
+            transcript.add_message(&msg);
+        }
+
+        Ok(msg)
     }
 }
 
