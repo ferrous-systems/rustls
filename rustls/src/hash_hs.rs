@@ -13,7 +13,6 @@ use core::mem;
 /// Before we know the hash algorithm to use to verify the handshake, we just buffer the messages.
 /// During the handshake, we may restart the transcript due to a HelloRetryRequest, reverting
 /// from the `HandshakeHash` to a `HandshakeHashBuffer` again.
-#[derive(Debug)]
 pub(crate) struct HandshakeHashBuffer {
     buffer: Vec<u8>,
     client_auth_enabled: bool,
@@ -87,14 +86,6 @@ pub(crate) struct HandshakeHash {
 
     /// buffer for client-auth.
     client_auth: Option<Vec<u8>>,
-}
-
-impl core::fmt::Debug for HandshakeHash {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("HandshakeHash")
-            .field("client_auth", &self.client_auth)
-            .finish_non_exhaustive()
-    }
 }
 
 impl HandshakeHash {

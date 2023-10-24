@@ -37,7 +37,6 @@ use crate::{
     ContentType, InvalidMessage, ServerName, Side, SupportedCipherSuite, Tls12CipherSuite,
 };
 
-#[derive(Debug)]
 enum CommonState {
     Unreachable,
     StartHandshake,

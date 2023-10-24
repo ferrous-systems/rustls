@@ -69,7 +69,6 @@ impl fmt::Debug for Tls12CipherSuite {
 }
 
 /// TLS1.2 per-connection keying material
-#[derive(Debug)]
 pub(crate) struct ConnectionSecrets {
     pub(crate) randoms: ConnectionRandoms,
     suite: &'static Tls12CipherSuite,

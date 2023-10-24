@@ -503,7 +503,6 @@ fn emit_finished(
     common.send_msg(f, true);
 }
 
-#[derive(Debug)]
 pub(crate) struct ServerKxDetails {
     pub(crate) kx_params: Vec<u8>,
     kx_sig: DigitallySignedStruct,

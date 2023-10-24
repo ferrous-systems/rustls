@@ -1466,7 +1466,7 @@ pub enum KeyExchangeAlgorithm {
 // We don't support arbitrary curves.  It's a terrible
 // idea and unnecessary attack surface.  Please,
 // get a grip.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(crate) struct EcParameters {
     pub(crate) curve_type: ECCurveType,
     pub(crate) named_group: NamedGroup,
