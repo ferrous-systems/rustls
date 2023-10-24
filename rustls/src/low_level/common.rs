@@ -121,7 +121,6 @@ impl LlConnectionCommon {
         incoming_tls: &'i mut [u8],
     ) -> Result<Status<'c, 'i>, Error> {
         loop {
-            std::dbg!(&self.state);
             match self.state.take() {
                 CommonState::Unreachable => unreachable!(),
                 state @ (CommonState::StartHandshake
@@ -129,7 +128,6 @@ impl LlConnectionCommon {
                 | CommonState::WriteChangeCipherSpec { .. }
                 | CommonState::WriteFinished { .. }) => {
                     self.state = state;
-
                     return Ok(Status {
                         discard: 0,
                         state: State::MustEncryptTlsData(MustEncryptTlsData { conn: self }),
@@ -503,7 +501,7 @@ impl LlConnectionCommon {
 
         let mut written_bytes = 0;
 
-        for m in message_fragmenter.fragment_message(&std::dbg!(msg).into()) {
+        for m in message_fragmenter.fragment_message(&msg.into()) {
             let opaque_msg = if is_encrypted {
                 self.record_layer.encrypt_outgoing(m)
             } else {

@@ -43,7 +43,6 @@ fn main() -> io::Result<()> {
             .process_tls_records(&mut incoming_tls)
             .unwrap();
 
-        dbg!(outgoing_used);
         match state {
             // logic similar to the one presented in the 'handling InsufficientSizeError' section is
             // used in these states
