@@ -162,11 +162,7 @@ impl LlConnectionCommon {
                     });
                 }
                 CommonState::WaitServerHello { transcript_buffer } => {
-                    let mut reader = Reader::init(&incoming_tls[self.offset..]);
-                    let m = OpaqueMessage::read(&mut reader)
-                        .unwrap()
-                        .into_plain_message();
-                    let msg = Message::try_from(m).unwrap();
+                    let msg = self.read_message(incoming_tls)?;
 
                     match &msg.payload {
                         MessagePayload::Handshake {
@@ -199,7 +195,6 @@ impl LlConnectionCommon {
                                 randoms: ConnectionRandoms::new(Random([0u8; 32]), payload.random),
                                 transcript,
                             };
-                            self.offset += reader.used();
                         }
                         _ => {
                             return Err(Error::InvalidMessage(InvalidMessage::UnexpectedMessage(
@@ -213,12 +208,7 @@ impl LlConnectionCommon {
                     randoms,
                     mut transcript,
                 } => {
-                    let mut reader = Reader::init(&incoming_tls[self.offset..]);
-                    let m = OpaqueMessage::read(&mut reader)
-                        .unwrap()
-                        .into_plain_message();
-
-                    let msg = Message::try_from(m).unwrap();
+                    let msg = self.read_message(incoming_tls)?;
 
                     transcript.add_message(&msg);
                     match msg.payload {
@@ -246,7 +236,6 @@ impl LlConnectionCommon {
                                 randoms,
                                 transcript,
                             };
-                            self.offset += reader.used();
                         }
                         _ => {
                             return Err(Error::InvalidMessage(InvalidMessage::UnexpectedMessage(
@@ -260,12 +249,7 @@ impl LlConnectionCommon {
                     randoms,
                     mut transcript,
                 } => {
-                    let mut reader = Reader::init(&incoming_tls[self.offset..]);
-                    let m = OpaqueMessage::read(&mut reader)
-                        .unwrap()
-                        .into_plain_message();
-
-                    let msg = Message::try_from(m).unwrap();
+                    let msg = self.read_message(incoming_tls)?;
                     transcript.add_message(&msg);
 
                     match msg.payload {
@@ -283,7 +267,6 @@ impl LlConnectionCommon {
                                 opaque_kx,
                                 transcript,
                             };
-                            self.offset += reader.used();
                         }
                         _ => {
                             return Err(Error::InvalidMessage(InvalidMessage::UnexpectedMessage(
@@ -298,13 +281,7 @@ impl LlConnectionCommon {
                     opaque_kx,
                     mut transcript,
                 } => {
-                    let mut reader = Reader::init(&incoming_tls[self.offset..]);
-                    let m = OpaqueMessage::read(&mut reader)
-                        .unwrap()
-                        .into_plain_message();
-                    self.offset += reader.used();
-
-                    let msg = Message::try_from(m).unwrap();
+                    let msg = self.read_message(incoming_tls)?;
                     transcript.add_message(&msg);
 
                     match msg.payload {
@@ -355,18 +332,12 @@ impl LlConnectionCommon {
                     }
                 }
                 CommonState::WaitChangeCipherSpec => {
-                    let mut reader = Reader::init(&incoming_tls[self.offset..]);
-                    let m = OpaqueMessage::read(&mut reader)
-                        .unwrap()
-                        .into_plain_message();
-
-                    let msg = Message::try_from(m).unwrap();
+                    let msg = self.read_message(incoming_tls)?;
 
                     match msg.payload {
                         MessagePayload::ChangeCipherSpec(_) => {
                             self.record_layer.start_decrypting();
                             self.state = CommonState::WaitFinished;
-                            self.offset += reader.used();
                         }
                         _ => {
                             std::dbg!(msg.payload);
@@ -377,15 +348,7 @@ impl LlConnectionCommon {
                     }
                 }
                 CommonState::WaitFinished => {
-                    let mut reader = Reader::init(&incoming_tls[self.offset..]);
-                    let m = self
-                        .record_layer
-                        .decrypt_incoming(OpaqueMessage::read(&mut reader).unwrap())
-                        .unwrap()
-                        .unwrap()
-                        .plaintext;
-
-                    let msg = Message::try_from(m).unwrap();
+                    let msg = self.read_message(incoming_tls)?;
 
                     match msg.payload {
                         MessagePayload::Handshake {
@@ -397,7 +360,6 @@ impl LlConnectionCommon {
                             ..
                         } => {
                             self.state = CommonState::HandshakeDone;
-                            self.offset += reader.used();
                         }
                         _ => {
                             std::dbg!(msg.payload);
@@ -647,6 +609,20 @@ impl LlConnectionCommon {
         _outgoing_tls: &mut [u8],
     ) -> Result<usize, EncryptError> {
         todo!()
+    }
+
+    fn read_message(&mut self, incoming_tls: &[u8]) -> Result<Message, Error> {
+        let mut reader = Reader::init(&incoming_tls[self.offset..]);
+        // FIXME: propagate this error
+        let m = OpaqueMessage::read(&mut reader).unwrap();
+        self.offset += reader.used();
+
+        let decrypted = self
+            .record_layer
+            .decrypt_incoming(m)?
+            .expect("we don't support early data yet");
+
+        decrypted.plaintext.try_into()
     }
 }
 
