@@ -364,6 +364,7 @@ impl LlConnectionCommon {
 
                     match msg.payload {
                         MessagePayload::ChangeCipherSpec(_) => {
+                            self.record_layer.start_decrypting();
                             self.state = CommonState::WaitFinished;
                             self.offset += reader.used();
                         }
@@ -377,9 +378,12 @@ impl LlConnectionCommon {
                 }
                 CommonState::WaitFinished => {
                     let mut reader = Reader::init(&incoming_tls[self.offset..]);
-                    let m = OpaqueMessage::read(&mut reader)
+                    let m = self
+                        .record_layer
+                        .decrypt_incoming(OpaqueMessage::read(&mut reader).unwrap())
                         .unwrap()
-                        .into_plain_message();
+                        .unwrap()
+                        .plaintext;
 
                     let msg = Message::try_from(m).unwrap();
 
