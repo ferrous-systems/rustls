@@ -52,8 +52,6 @@ fn main() -> io::Result<()> {
                     .unwrap();
                 outgoing_used += n;
             }
-            State::MayEncryptAppData(_) => { /* .. */ }
-
             State::MustTransmitTlsData(state) => {
                 sock.write_all(&outgoing_tls[..outgoing_used])?;
 

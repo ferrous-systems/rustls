@@ -350,18 +350,6 @@ impl LlConnectionCommon {
         }
     }
 
-    fn encrypt_app_data(
-        &self,
-        _application_data: &[u8],
-        _outgoing_tls: &mut [u8],
-    ) -> Result<usize, InsufficientSizeError> {
-        todo!()
-    }
-
-    fn app_data_done(&self) {
-        todo!()
-    }
-
     fn encrypt_tls_data(&mut self, outgoing_tls: &mut [u8]) -> Result<usize, EncryptError> {
         let message_fragmenter = MessageFragmenter::default();
         let mut is_encrypted = false;
@@ -648,9 +636,6 @@ pub enum State<'c, 'i> {
     /// One, or more, application data record is available
     AppDataAvailable(AppDataAvailable<'c, 'i>),
 
-    /// Application data may be encrypted at this stage of the handshake
-    MayEncryptAppData(MayEncryptAppData<'c>),
-
     /// A Handshake record must be encrypted into the `outgoing_tls` buffer
     MustEncryptTlsData(MustEncryptTlsData<'c>),
 
@@ -719,14 +704,16 @@ impl<'c, 'i> AppDataAvailable<'c, 'i> {
     ///
     /// returns `None` if there are no more app-data records
     pub fn peek_len(&self) -> Option<NonZeroUsize> {
-        todo!()
-    }
-}
+        let mut reader = Reader::init(&self.incoming_tls.as_deref()?[self.conn.offset..]);
 
-/// FIXME: docs
-pub struct MayEncryptAppData<'c> {
-    /// FIXME: docs
-    conn: &'c mut LlConnectionCommon,
+        match OpaqueMessage::read(&mut reader) {
+            Ok(OpaqueMessage {
+                typ: ContentType::ApplicationData,
+                ..
+            }) => Some(reader.used().try_into().unwrap()),
+            _ => None,
+        }
+    }
 }
 
 /// Provided buffer was too small
@@ -734,26 +721,6 @@ pub struct MayEncryptAppData<'c> {
 pub struct InsufficientSizeError {
     /// buffer must be at least this size
     pub required_size: usize,
-}
-
-impl<'c> MayEncryptAppData<'c> {
-    /// encrypts `application_data` into `outgoing_tls`
-    ///
-    /// returns the number of bytes that were written into `outgoing_tls`, or an error if
-    /// the provided buffer was too small. in the error case, `outgoing_tls` is not modified
-    pub fn encrypt(
-        &mut self,
-        application_data: &[u8],
-        outgoing_tls: &mut [u8],
-    ) -> Result<usize, InsufficientSizeError> {
-        self.conn
-            .encrypt_app_data(application_data, outgoing_tls)
-    }
-
-    /// No more encryption will be performed; continue with the handshake process
-    pub fn done(self) {
-        self.conn.app_data_done()
-    }
 }
 
 /// FIXME: docs
