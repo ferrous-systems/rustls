@@ -44,19 +44,16 @@ enum CommonState {
         transcript_buffer: HandshakeHashBuffer,
     },
     WaitCert {
-        offset: usize,
         suite: &'static Tls12CipherSuite,
         randoms: ConnectionRandoms,
         transcript: HandshakeHash,
     },
     WaitServerKeyExchange {
-        offset: usize,
         suite: &'static Tls12CipherSuite,
         randoms: ConnectionRandoms,
         transcript: HandshakeHash,
     },
     WaitServerHelloDone {
-        offset: usize,
         suite: &'static Tls12CipherSuite,
         opaque_kx: ServerKeyExchangePayload,
         randoms: ConnectionRandoms,
@@ -85,6 +82,9 @@ enum CommonState {
         transcript: HandshakeHash,
     },
     SendFinished,
+    WaitChangeCipherSpec,
+    WaitFinished,
+    HandshakeDone,
 }
 
 impl CommonState {
@@ -99,6 +99,7 @@ pub struct LlConnectionCommon {
     name: ServerName,
     state: CommonState,
     record_layer: RecordLayer,
+    offset: usize,
 }
 
 impl LlConnectionCommon {
@@ -109,6 +110,7 @@ impl LlConnectionCommon {
             name,
             state: CommonState::StartHandshake,
             record_layer: RecordLayer::new(),
+            offset: 0,
         }
     }
 
@@ -143,23 +145,27 @@ impl LlConnectionCommon {
                         state: State::MustTransmitTlsData(MustTransmitTlsData { conn: self }),
                     });
                 }
-                state @ CommonState::WaitServerHello { .. }
-                    if incoming_tls.iter().all(|&b| b == 0) =>
+                state @ (CommonState::WaitServerHello { .. }
+                | CommonState::WaitCert { .. }
+                | CommonState::WaitServerKeyExchange { .. }
+                | CommonState::WaitServerHelloDone { .. }
+                | CommonState::WaitChangeCipherSpec
+                | CommonState::WaitFinished)
+                    if incoming_tls[self.offset..]
+                        .iter()
+                        .all(|&b| b == 0) =>
                 {
                     self.state = state;
-
                     return Ok(Status {
                         discard: 0,
                         state: State::NeedsMoreTlsData { num_bytes: None },
                     });
                 }
                 CommonState::WaitServerHello { transcript_buffer } => {
-                    let mut reader = Reader::init(incoming_tls);
+                    let mut reader = Reader::init(&incoming_tls[self.offset..]);
                     let m = OpaqueMessage::read(&mut reader)
                         .unwrap()
                         .into_plain_message();
-                    let read_bytes = reader.used();
-
                     let msg = Message::try_from(m).unwrap();
 
                     match &msg.payload {
@@ -189,11 +195,11 @@ impl LlConnectionCommon {
                             };
 
                             self.state = CommonState::WaitCert {
-                                offset: read_bytes,
                                 suite,
                                 randoms: ConnectionRandoms::new(Random([0u8; 32]), payload.random),
                                 transcript,
                             };
+                            self.offset += reader.used();
                         }
                         _ => {
                             return Err(Error::InvalidMessage(InvalidMessage::UnexpectedMessage(
@@ -203,79 +209,58 @@ impl LlConnectionCommon {
                     }
                 }
                 CommonState::WaitCert {
-                    offset,
                     suite,
                     randoms,
                     mut transcript,
                 } => {
-                    if incoming_tls[offset..]
-                        .iter()
-                        .all(|&b| b == 0)
-                    {
-                        self.state = CommonState::WaitCert {
-                            offset: 0,
-                            suite,
-                            randoms,
-                            transcript,
-                        };
+                    let mut reader = Reader::init(&incoming_tls[self.offset..]);
+                    let m = OpaqueMessage::read(&mut reader)
+                        .unwrap()
+                        .into_plain_message();
 
-                        return Ok(Status {
-                            discard: offset,
-                            state: State::NeedsMoreTlsData { num_bytes: None },
-                        });
-                    } else {
-                        let mut reader = Reader::init(&incoming_tls[offset..]);
-                        let m = OpaqueMessage::read(&mut reader)
-                            .unwrap()
-                            .into_plain_message();
+                    let msg = Message::try_from(m).unwrap();
 
-                        let msg = Message::try_from(m).unwrap();
+                    transcript.add_message(&msg);
+                    match msg.payload {
+                        MessagePayload::Handshake {
+                            parsed:
+                                HandshakeMessagePayload {
+                                    typ: HandshakeType::Certificate,
+                                    payload: HandshakePayload::Certificate(payload),
+                                },
+                            ..
+                        } => {
+                            self.config
+                                .verifier
+                                .verify_server_cert(
+                                    &payload[0],
+                                    &[],
+                                    &self.name,
+                                    &[],
+                                    UnixTime::now(),
+                                )
+                                .unwrap();
 
-                        transcript.add_message(&msg);
-                        match msg.payload {
-                            MessagePayload::Handshake {
-                                parsed:
-                                    HandshakeMessagePayload {
-                                        typ: HandshakeType::Certificate,
-                                        payload: HandshakePayload::Certificate(payload),
-                                    },
-                                ..
-                            } => {
-                                self.config
-                                    .verifier
-                                    .verify_server_cert(
-                                        &payload[0],
-                                        &[],
-                                        &self.name,
-                                        &[],
-                                        UnixTime::now(),
-                                    )
-                                    .unwrap();
-
-                                self.state = CommonState::WaitServerKeyExchange {
-                                    offset: offset + reader.used(),
-                                    suite,
-                                    randoms,
-                                    transcript,
-                                };
-                            }
-                            _ => {
-                                return Err(Error::InvalidMessage(
-                                    InvalidMessage::UnexpectedMessage(
-                                        "expected certificate request",
-                                    ),
-                                ));
-                            }
+                            self.state = CommonState::WaitServerKeyExchange {
+                                suite,
+                                randoms,
+                                transcript,
+                            };
+                            self.offset += reader.used();
+                        }
+                        _ => {
+                            return Err(Error::InvalidMessage(InvalidMessage::UnexpectedMessage(
+                                "expected certificate request",
+                            )));
                         }
                     }
                 }
                 CommonState::WaitServerKeyExchange {
-                    offset,
                     suite,
                     randoms,
                     mut transcript,
                 } => {
-                    let mut reader = Reader::init(&incoming_tls[offset..]);
+                    let mut reader = Reader::init(&incoming_tls[self.offset..]);
                     let m = OpaqueMessage::read(&mut reader)
                         .unwrap()
                         .into_plain_message();
@@ -293,12 +278,12 @@ impl LlConnectionCommon {
                             ..
                         } => {
                             self.state = CommonState::WaitServerHelloDone {
-                                offset: offset + reader.used(),
                                 suite,
                                 randoms,
                                 opaque_kx,
                                 transcript,
                             };
+                            self.offset += reader.used();
                         }
                         _ => {
                             return Err(Error::InvalidMessage(InvalidMessage::UnexpectedMessage(
@@ -308,16 +293,16 @@ impl LlConnectionCommon {
                     }
                 }
                 CommonState::WaitServerHelloDone {
-                    offset,
                     suite,
                     randoms,
                     opaque_kx,
                     mut transcript,
                 } => {
-                    let mut reader = Reader::init(&incoming_tls[offset..]);
+                    let mut reader = Reader::init(&incoming_tls[self.offset..]);
                     let m = OpaqueMessage::read(&mut reader)
                         .unwrap()
                         .into_plain_message();
+                    self.offset += reader.used();
 
                     let msg = Message::try_from(m).unwrap();
                     transcript.add_message(&msg);
@@ -332,7 +317,6 @@ impl LlConnectionCommon {
                             ..
                         } => {
                             self.state = CommonState::WaitServerHelloDone {
-                                offset: offset + reader.used(),
                                 suite,
                                 randoms,
                                 opaque_kx,
@@ -370,6 +354,56 @@ impl LlConnectionCommon {
                         }
                     }
                 }
+                CommonState::WaitChangeCipherSpec => {
+                    let mut reader = Reader::init(&incoming_tls[self.offset..]);
+                    let m = OpaqueMessage::read(&mut reader)
+                        .unwrap()
+                        .into_plain_message();
+
+                    let msg = Message::try_from(m).unwrap();
+
+                    match msg.payload {
+                        MessagePayload::ChangeCipherSpec(_) => {
+                            self.state = CommonState::WaitFinished;
+                            self.offset += reader.used();
+                        }
+                        _ => {
+                            std::dbg!(msg.payload);
+                            return Err(Error::InvalidMessage(InvalidMessage::UnexpectedMessage(
+                                "expected change cipher spec",
+                            )));
+                        }
+                    }
+                }
+                CommonState::WaitFinished => {
+                    let mut reader = Reader::init(&incoming_tls[self.offset..]);
+                    let m = OpaqueMessage::read(&mut reader)
+                        .unwrap()
+                        .into_plain_message();
+
+                    let msg = Message::try_from(m).unwrap();
+
+                    match msg.payload {
+                        MessagePayload::Handshake {
+                            parsed:
+                                HandshakeMessagePayload {
+                                    typ: HandshakeType::Finished,
+                                    payload: HandshakePayload::Finished(_),
+                                },
+                            ..
+                        } => {
+                            self.state = CommonState::HandshakeDone;
+                            self.offset += reader.used();
+                        }
+                        _ => {
+                            std::dbg!(msg.payload);
+                            return Err(Error::InvalidMessage(InvalidMessage::UnexpectedMessage(
+                                "expected finished",
+                            )));
+                        }
+                    }
+                }
+                CommonState::HandshakeDone => todo!(),
             }
         }
     }
@@ -597,7 +631,7 @@ impl LlConnectionCommon {
                 };
             }
             CommonState::SendFinished => {
-                todo!()
+                self.state = CommonState::WaitChangeCipherSpec;
             }
             _ => unreachable!(),
         }
