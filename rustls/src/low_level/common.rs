@@ -578,16 +578,28 @@ impl LlConnectionCommon {
                     HandshakePayload::Certificate
                 )?;
 
-                self.config
-                    .verifier
-                    .verify_server_cert(&payload[0], &[], &self.name, &[], UnixTime::now())
-                    .unwrap();
-
-                CommonState::Expect(ExpectState::ServerKeyExchange {
-                    suite,
-                    randoms,
-                    transcript,
-                })
+                if let Err(error) = self.config.verifier.verify_server_cert(
+                    &payload[0],
+                    &[],
+                    &self.name,
+                    &[],
+                    UnixTime::now(),
+                ) {
+                    CommonState::Write(WriteState::Alert {
+                        description: match &error {
+                            Error::InvalidCertificate(e) => e.clone().into(),
+                            Error::PeerMisbehaved(_) => AlertDescription::IllegalParameter,
+                            _ => AlertDescription::HandshakeFailure,
+                        },
+                        error,
+                    })
+                } else {
+                    CommonState::Expect(ExpectState::ServerKeyExchange {
+                        suite,
+                        randoms,
+                        transcript,
+                    })
+                }
             }
             ExpectState::ServerKeyExchange {
                 suite,
