@@ -614,7 +614,13 @@ impl LlConnectionCommon {
             transcript.add_message(&msg);
         }
 
-        std::println!("Read {:?}", msg);
+        match msg.payload {
+            MessagePayload::Handshake {
+                parsed: HandshakeMessagePayload { typ, .. },
+                ..
+            } => std::println!("Read {:?}", typ),
+            _ => std::println!("Read {:?}", msg.payload.content_type()),
+        };
 
         Ok(msg)
     }
