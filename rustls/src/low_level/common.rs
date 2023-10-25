@@ -352,174 +352,175 @@ impl LlConnectionCommon {
         }
     }
 
-    fn encrypt_tls_data(&mut self, outgoing_tls: &mut [u8]) -> Result<usize, EncryptError> {
-        let message_fragmenter = MessageFragmenter::default();
-        let mut is_encrypted = false;
+    fn generate_message(&mut self, write_state: WriteState) -> (Message, bool) {
+        match write_state {
+            WriteState::ClientHello => {
+                let support_tls12 = self
+                    .config
+                    .supports_version(ProtocolVersion::TLSv1_2);
 
-        let msg = match self.state.take() {
-            CommonState::Write(write_state) => match write_state {
-                WriteState::ClientHello => {
-                    let support_tls12 = self
-                        .config
-                        .supports_version(ProtocolVersion::TLSv1_2);
-
-                    let mut supported_versions = Vec::new();
-                    if support_tls12 {
-                        supported_versions.push(ProtocolVersion::TLSv1_2);
-                    }
-
-                    let payload = HandshakeMessagePayload {
-                        typ: HandshakeType::ClientHello,
-                        payload: HandshakePayload::ClientHello(ClientHelloPayload {
-                            client_version: ProtocolVersion::TLSv1_2,
-                            random: Random([0u8; 32]),
-                            session_id: SessionId::empty(),
-                            cipher_suites: self
-                                .config
-                                .cipher_suites
-                                .iter()
-                                .map(|cs| cs.suite())
-                                .collect(),
-                            compression_methods: vec![Compression::Null],
-                            extensions: vec![
-                                ClientExtension::SupportedVersions(supported_versions),
-                                ClientExtension::EcPointFormats(ECPointFormat::SUPPORTED.to_vec()),
-                                ClientExtension::NamedGroups(
-                                    self.config
-                                        .kx_groups
-                                        .iter()
-                                        .map(|skxg| skxg.name())
-                                        .collect(),
-                                ),
-                                ClientExtension::SignatureAlgorithms(
-                                    self.config
-                                        .verifier
-                                        .supported_verify_schemes(),
-                                ),
-                                ClientExtension::ExtendedMasterSecretRequest,
-                                ClientExtension::CertificateStatusRequest(
-                                    CertificateStatusRequest::build_ocsp(),
-                                ),
-                            ],
-                        }),
-                    };
-
-                    let msg = Message {
-                        version: ProtocolVersion::TLSv1_0,
-                        payload: MessagePayload::handshake(payload),
-                    };
-
-                    let mut transcript_buffer = HandshakeHashBuffer::new();
-                    transcript_buffer.add_message(&msg);
-                    self.state = CommonState::Send(SendState::ClientHello { transcript_buffer });
-
-                    msg
+                let mut supported_versions = Vec::new();
+                if support_tls12 {
+                    supported_versions.push(ProtocolVersion::TLSv1_2);
                 }
-                WriteState::ClientKeyExchange {
-                    suite,
-                    server_kx,
-                    randoms,
-                    mut transcript,
-                } => {
-                    let mut rd = Reader::init(&server_kx.kx_params);
-                    let ecdh_params = ServerEcdhParams::read(&mut rd).unwrap();
-                    assert!(!rd.any_left());
 
-                    let named_group = ecdh_params.curve_params.named_group;
-                    let skxg = self
-                        .config
-                        .find_kx_group(named_group)
-                        .unwrap();
+                let payload = HandshakeMessagePayload {
+                    typ: HandshakeType::ClientHello,
+                    payload: HandshakePayload::ClientHello(ClientHelloPayload {
+                        client_version: ProtocolVersion::TLSv1_2,
+                        random: Random([0u8; 32]),
+                        session_id: SessionId::empty(),
+                        cipher_suites: self
+                            .config
+                            .cipher_suites
+                            .iter()
+                            .map(|cs| cs.suite())
+                            .collect(),
+                        compression_methods: vec![Compression::Null],
+                        extensions: vec![
+                            ClientExtension::SupportedVersions(supported_versions),
+                            ClientExtension::EcPointFormats(ECPointFormat::SUPPORTED.to_vec()),
+                            ClientExtension::NamedGroups(
+                                self.config
+                                    .kx_groups
+                                    .iter()
+                                    .map(|skxg| skxg.name())
+                                    .collect(),
+                            ),
+                            ClientExtension::SignatureAlgorithms(
+                                self.config
+                                    .verifier
+                                    .supported_verify_schemes(),
+                            ),
+                            ClientExtension::ExtendedMasterSecretRequest,
+                            ClientExtension::CertificateStatusRequest(
+                                CertificateStatusRequest::build_ocsp(),
+                            ),
+                        ],
+                    }),
+                };
 
-                    let kx = skxg.start().unwrap();
+                let msg = Message {
+                    version: ProtocolVersion::TLSv1_0,
+                    payload: MessagePayload::handshake(payload),
+                };
 
-                    let mut buf = Vec::new();
-                    let ecpoint = PayloadU8::new(Vec::from(kx.pub_key()));
-                    ecpoint.encode(&mut buf);
-                    let pubkey = Payload::new(buf);
+                let mut transcript_buffer = HandshakeHashBuffer::new();
+                transcript_buffer.add_message(&msg);
+                self.state = CommonState::Send(SendState::ClientHello { transcript_buffer });
 
-                    let msg = Message {
-                        version: ProtocolVersion::TLSv1_2,
-                        payload: MessagePayload::handshake(HandshakeMessagePayload {
-                            typ: HandshakeType::ClientKeyExchange,
-                            payload: HandshakePayload::ClientKeyExchange(pubkey),
-                        }),
-                    };
+                (msg, false)
+            }
+            WriteState::ClientKeyExchange {
+                suite,
+                server_kx,
+                randoms,
+                mut transcript,
+            } => {
+                let mut rd = Reader::init(&server_kx.kx_params);
+                let ecdh_params = ServerEcdhParams::read(&mut rd).unwrap();
+                assert!(!rd.any_left());
 
-                    transcript.add_message(&msg);
-
-                    let secrets = ConnectionSecrets::from_key_exchange(
-                        kx,
-                        &ecdh_params.public.0,
-                        Some(transcript.get_current_hash()),
-                        randoms,
-                        suite,
-                    )
+                let named_group = ecdh_params.curve_params.named_group;
+                let skxg = self
+                    .config
+                    .find_kx_group(named_group)
                     .unwrap();
 
-                    let (dec, enc) = secrets.make_cipher_pair(Side::Client);
+                let kx = skxg.start().unwrap();
 
-                    self.record_layer
-                        .prepare_message_encrypter(enc);
-                    self.record_layer
-                        .prepare_message_decrypter(dec);
-                    self.record_layer.start_encrypting();
+                let mut buf = Vec::new();
+                let ecpoint = PayloadU8::new(Vec::from(kx.pub_key()));
+                ecpoint.encode(&mut buf);
+                let pubkey = Payload::new(buf);
 
-                    self.state = CommonState::Send(SendState::ClientKeyExchange {
-                        secrets,
-                        transcript,
-                    });
+                let msg = Message {
+                    version: ProtocolVersion::TLSv1_2,
+                    payload: MessagePayload::handshake(HandshakeMessagePayload {
+                        typ: HandshakeType::ClientKeyExchange,
+                        payload: HandshakePayload::ClientKeyExchange(pubkey),
+                    }),
+                };
 
-                    msg
-                }
-                WriteState::ChangeCipherSpec {
+                transcript.add_message(&msg);
+
+                let secrets = ConnectionSecrets::from_key_exchange(
+                    kx,
+                    &ecdh_params.public.0,
+                    Some(transcript.get_current_hash()),
+                    randoms,
+                    suite,
+                )
+                .unwrap();
+
+                let (dec, enc) = secrets.make_cipher_pair(Side::Client);
+
+                self.record_layer
+                    .prepare_message_encrypter(enc);
+                self.record_layer
+                    .prepare_message_decrypter(dec);
+                self.record_layer.start_encrypting();
+
+                self.state = CommonState::Send(SendState::ClientKeyExchange {
                     secrets,
-                    mut transcript,
-                } => {
-                    let msg = Message {
-                        version: ProtocolVersion::TLSv1_2,
-                        payload: MessagePayload::ChangeCipherSpec(ChangeCipherSpecPayload {}),
-                    };
+                    transcript,
+                });
 
-                    transcript.add_message(&msg);
-                    self.state = CommonState::Send(SendState::ChangeCipherSpec {
-                        secrets,
-                        transcript,
-                    });
+                (msg, false)
+            }
+            WriteState::ChangeCipherSpec {
+                secrets,
+                mut transcript,
+            } => {
+                let msg = Message {
+                    version: ProtocolVersion::TLSv1_2,
+                    payload: MessagePayload::ChangeCipherSpec(ChangeCipherSpecPayload {}),
+                };
 
-                    msg
-                }
-                WriteState::Finished {
-                    mut transcript,
+                transcript.add_message(&msg);
+                self.state = CommonState::Send(SendState::ChangeCipherSpec {
                     secrets,
-                } => {
-                    let vh = transcript.get_current_hash();
-                    let verify_data = secrets.client_verify_data(&vh);
-                    let verify_data_payload = Payload::new(verify_data);
+                    transcript,
+                });
 
-                    is_encrypted = true;
+                (msg, false)
+            }
+            WriteState::Finished {
+                mut transcript,
+                secrets,
+            } => {
+                let vh = transcript.get_current_hash();
+                let verify_data = secrets.client_verify_data(&vh);
+                let verify_data_payload = Payload::new(verify_data);
 
-                    let msg = Message {
-                        version: ProtocolVersion::TLSv1_2,
-                        payload: MessagePayload::handshake(HandshakeMessagePayload {
-                            typ: HandshakeType::Finished,
-                            payload: HandshakePayload::Finished(verify_data_payload),
-                        }),
-                    };
+                let msg = Message {
+                    version: ProtocolVersion::TLSv1_2,
+                    payload: MessagePayload::handshake(HandshakeMessagePayload {
+                        typ: HandshakeType::Finished,
+                        payload: HandshakePayload::Finished(verify_data_payload),
+                    }),
+                };
 
-                    transcript.add_message(&msg);
-                    self.state = CommonState::Send(SendState::Finished);
+                transcript.add_message(&msg);
+                self.state = CommonState::Send(SendState::Finished);
 
-                    msg
-                }
-            },
+                (msg, true)
+            }
+        }
+    }
+
+    fn encrypt_tls_data(&mut self, outgoing_tls: &mut [u8]) -> Result<usize, EncryptError> {
+        let message_fragmenter = MessageFragmenter::default();
+
+        let (msg, needs_encryption) = match self.state.take() {
+            CommonState::Write(write_state) => self.generate_message(write_state),
             _ => unreachable!(),
         };
 
         let mut written_bytes = 0;
 
         for m in message_fragmenter.fragment_message(&msg.into()) {
-            let opaque_msg = if is_encrypted {
+            let opaque_msg = if needs_encryption {
                 self.record_layer.encrypt_outgoing(m)
             } else {
                 m.to_unencrypted_opaque()
