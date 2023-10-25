@@ -2,6 +2,7 @@
 
 use core::num::NonZeroUsize;
 
+use alloc::boxed::Box;
 use alloc::vec;
 use alloc::vec::Vec;
 use pki_types::UnixTime;
@@ -11,6 +12,7 @@ use crate::check::{inappropriate_handshake_message, inappropriate_message};
 use crate::client::tls12::ServerKxDetails;
 use crate::conn::ConnectionRandoms;
 use crate::crypto::cipher::{OpaqueMessage, PlainMessage};
+use crate::crypto::ActiveKeyExchange;
 use crate::hash_hs::{HandshakeHash, HandshakeHashBuffer};
 use crate::internal::record_layer::RecordLayer;
 use crate::msgs::base::{Payload, PayloadU8};
@@ -34,8 +36,8 @@ use crate::{
     ClientConfig, Error, HandshakeType, ProtocolVersion,
 };
 use crate::{
-    AlertDescription, ContentType, InvalidMessage, ServerName, Side, SupportedCipherSuite,
-    Tls12CipherSuite,
+    AlertDescription, ContentType, InvalidMessage, PeerMisbehaved, ServerName, Side,
+    SupportedCipherSuite, Tls12CipherSuite,
 };
 
 enum ExpectState {
@@ -66,7 +68,8 @@ enum WriteState {
     ClientHello,
     ClientKeyExchange {
         suite: &'static Tls12CipherSuite,
-        server_kx: ServerKxDetails,
+        kx: Box<dyn ActiveKeyExchange>,
+        ecdh_params: ServerEcdhParams,
         randoms: ConnectionRandoms,
         transcript: HandshakeHash,
     },
@@ -307,22 +310,11 @@ impl LlConnectionCommon {
             }
             WriteState::ClientKeyExchange {
                 suite,
-                server_kx,
+                kx,
+                ecdh_params,
                 randoms,
                 mut transcript,
             } => {
-                let mut rd = Reader::init(&server_kx.kx_params);
-                let ecdh_params = ServerEcdhParams::read(&mut rd).unwrap();
-                assert!(!rd.any_left());
-
-                let named_group = ecdh_params.curve_params.named_group;
-                let skxg = self
-                    .config
-                    .find_kx_group(named_group)
-                    .unwrap();
-
-                let kx = skxg.start().unwrap();
-
                 let mut buf = Vec::new();
                 let ecpoint = PayloadU8::new(Vec::from(kx.pub_key()));
                 ecpoint.encode(&mut buf);
@@ -546,26 +538,30 @@ impl LlConnectionCommon {
                     HandshakeType::ServerHello,
                     HandshakePayload::ServerHello
                 )?;
-
-                let suite = self
+                if let Some(suite) = self
                     .config
                     .find_cipher_suite(payload.cipher_suite)
-                    .unwrap();
+                {
+                    let mut transcript = transcript_buffer.start_hash(suite.hash_provider());
 
-                let mut transcript = transcript_buffer.start_hash(suite.hash_provider());
+                    transcript.add_message(&msg);
 
-                transcript.add_message(&msg);
+                    let suite = match suite {
+                        SupportedCipherSuite::Tls12(suite) => suite,
+                        SupportedCipherSuite::Tls13(_) => todo!(),
+                    };
 
-                let suite = match suite {
-                    SupportedCipherSuite::Tls12(suite) => suite,
-                    SupportedCipherSuite::Tls13(_) => todo!(),
-                };
-
-                CommonState::Expect(ExpectState::Certificate {
-                    suite,
-                    randoms: ConnectionRandoms::new(Random([0u8; 32]), payload.random),
-                    transcript,
-                })
+                    CommonState::Expect(ExpectState::Certificate {
+                        suite,
+                        randoms: ConnectionRandoms::new(Random([0u8; 32]), payload.random),
+                        transcript,
+                    })
+                } else {
+                    CommonState::Write(WriteState::Alert {
+                        description: AlertDescription::HandshakeFailure,
+                        error: PeerMisbehaved::SelectedUnofferedCipherSuite.into(),
+                    })
+                }
             }
             ExpectState::Certificate {
                 suite,
@@ -624,56 +620,81 @@ impl LlConnectionCommon {
                 randoms,
                 opaque_kx,
                 transcript,
-            } => match msg.payload {
-                MessagePayload::Handshake {
-                    parsed:
-                        HandshakeMessagePayload {
-                            typ: HandshakeType::CertificateRequest,
-                            payload: HandshakePayload::CertificateRequest(_),
-                        },
-                    ..
-                } => CommonState::Expect(ExpectState::ServerHelloDone {
-                    suite,
-                    randoms,
-                    opaque_kx,
-                    transcript,
-                }),
-                MessagePayload::Handshake {
-                    parsed:
-                        HandshakeMessagePayload {
-                            typ: HandshakeType::ServerHelloDone,
-                            payload: HandshakePayload::ServerHelloDone,
-                        },
-                    ..
-                } => match opaque_kx.unwrap_given_kxa(suite.kx) {
-                    Some(ecdhe) => {
-                        let mut kx_params = Vec::new();
-                        ecdhe.params.encode(&mut kx_params);
-                        let server_kx = ServerKxDetails::new(kx_params, ecdhe.dss);
-
-                        CommonState::Write(WriteState::ClientKeyExchange {
-                            suite,
-                            server_kx,
-                            randoms,
-                            transcript,
-                        })
-                    }
-                    None => CommonState::Write(WriteState::Alert {
-                        description: AlertDescription::DecodeError,
-                        error: InvalidMessage::MissingKeyExchange.into(),
+            } => {
+                match msg.payload {
+                    MessagePayload::Handshake {
+                        parsed:
+                            HandshakeMessagePayload {
+                                typ: HandshakeType::CertificateRequest,
+                                payload: HandshakePayload::CertificateRequest(_),
+                            },
+                        ..
+                    } => CommonState::Expect(ExpectState::ServerHelloDone {
+                        suite,
+                        randoms,
+                        opaque_kx,
+                        transcript,
                     }),
-                },
-                payload => {
-                    return Err(inappropriate_handshake_message(
-                        &payload,
-                        &[ContentType::Handshake],
-                        &[
-                            HandshakeType::ServerHelloDone,
-                            HandshakeType::CertificateRequest,
-                        ],
-                    ));
+                    MessagePayload::Handshake {
+                        parsed:
+                            HandshakeMessagePayload {
+                                typ: HandshakeType::ServerHelloDone,
+                                payload: HandshakePayload::ServerHelloDone,
+                            },
+                        ..
+                    } => match opaque_kx.unwrap_given_kxa(suite.kx) {
+                        Some(ecdhe) => {
+                            let mut kx_params = Vec::new();
+                            ecdhe.params.encode(&mut kx_params);
+                            let server_kx = ServerKxDetails::new(kx_params, ecdhe.dss);
+
+                            let mut rd = Reader::init(&server_kx.kx_params);
+                            let ecdh_params = ServerEcdhParams::read(&mut rd)?;
+
+                            if rd.any_left() {
+                                CommonState::Write(WriteState::Alert {
+                                    description: AlertDescription::DecodeError,
+                                    error: InvalidMessage::InvalidDhParams.into(),
+                                })
+                            } else if let Some(skxg) = self
+                                .config
+                                .find_kx_group(ecdh_params.curve_params.named_group)
+                            {
+                                let kx = skxg
+                                    .start()
+                                    .map_err(|_| Error::FailedToGetRandomBytes)?;
+
+                                CommonState::Write(WriteState::ClientKeyExchange {
+                                    suite,
+                                    kx,
+                                    ecdh_params,
+                                    randoms,
+                                    transcript,
+                                })
+                            } else {
+                                CommonState::Write(WriteState::Alert {
+                                    description: AlertDescription::IllegalParameter,
+                                    error: PeerMisbehaved::IllegalHelloRetryRequestWithUnofferedNamedGroup.into(),
+                                })
+                            }
+                        }
+                        None => CommonState::Write(WriteState::Alert {
+                            description: AlertDescription::DecodeError,
+                            error: InvalidMessage::MissingKeyExchange.into(),
+                        }),
+                    },
+                    payload => {
+                        return Err(inappropriate_handshake_message(
+                            &payload,
+                            &[ContentType::Handshake],
+                            &[
+                                HandshakeType::ServerHelloDone,
+                                HandshakeType::CertificateRequest,
+                            ],
+                        ));
+                    }
                 }
-            },
+            }
             ExpectState::ChangeCipherSpec => match msg.payload {
                 MessagePayload::ChangeCipherSpec(_) => {
                     self.record_layer.start_decrypting();
