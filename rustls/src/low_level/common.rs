@@ -645,22 +645,24 @@ impl LlConnectionCommon {
                             payload: HandshakePayload::ServerHelloDone,
                         },
                     ..
-                } => {
-                    let ecdhe = opaque_kx
-                        .unwrap_given_kxa(suite.kx)
-                        .unwrap();
+                } => match opaque_kx.unwrap_given_kxa(suite.kx) {
+                    Some(ecdhe) => {
+                        let mut kx_params = Vec::new();
+                        ecdhe.params.encode(&mut kx_params);
+                        let server_kx = ServerKxDetails::new(kx_params, ecdhe.dss);
 
-                    let mut kx_params = Vec::new();
-                    ecdhe.params.encode(&mut kx_params);
-                    let server_kx = ServerKxDetails::new(kx_params, ecdhe.dss);
-
-                    CommonState::Write(WriteState::ClientKeyExchange {
-                        suite,
-                        server_kx,
-                        randoms,
-                        transcript,
-                    })
-                }
+                        CommonState::Write(WriteState::ClientKeyExchange {
+                            suite,
+                            server_kx,
+                            randoms,
+                            transcript,
+                        })
+                    }
+                    None => CommonState::Write(WriteState::Alert {
+                        description: AlertDescription::DecodeError,
+                        error: InvalidMessage::MissingKeyExchange.into(),
+                    }),
+                },
                 payload => {
                     return Err(inappropriate_handshake_message(
                         &payload,
