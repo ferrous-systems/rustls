@@ -114,7 +114,7 @@ enum CommonState {
     Send(SendState),
     SetupEncryption {
         kx: Box<dyn ActiveKeyExchange>,
-        ecdh_params: ServerECDHParams,
+        peer_pub_key: Vec<u8>,
         randoms: ConnectionRandoms,
         suite: &'static Tls12CipherSuite,
         transcript: HandshakeHash,
@@ -227,14 +227,14 @@ impl LlConnectionCommon {
                 }
                 CommonState::SetupEncryption {
                     kx,
-                    ecdh_params,
+                    peer_pub_key,
                     randoms,
                     suite,
                     transcript,
                 } => {
                     let secrets = ConnectionSecrets::from_key_exchange(
                         kx,
-                        &ecdh_params.public.0,
+                        &peer_pub_key,
                         Some(transcript.get_current_hash()),
                         randoms,
                         suite,
@@ -367,7 +367,7 @@ impl LlConnectionCommon {
 
                 self.state = CommonState::SetupEncryption {
                     kx,
-                    ecdh_params,
+                    peer_pub_key: ecdh_params.public.0,
                     randoms,
                     suite,
                     transcript,
