@@ -112,6 +112,13 @@ enum CommonState {
     Expect(ExpectState),
     Write(WriteState),
     Send(SendState),
+    SetupEncryption {
+        kx: Box<dyn ActiveKeyExchange>,
+        ecdh_params: ServerECDHParams,
+        randoms: ConnectionRandoms,
+        suite: &'static Tls12CipherSuite,
+        transcript: HandshakeHash,
+    },
     HandshakeDone,
     Poisoned(Error),
 }
@@ -217,6 +224,34 @@ impl LlConnectionCommon {
                     expect_state,
                 } => {
                     self.state = self.process_message(expect_state, message)?;
+                }
+                CommonState::SetupEncryption {
+                    kx,
+                    ecdh_params,
+                    randoms,
+                    suite,
+                    transcript,
+                } => {
+                    let secrets = ConnectionSecrets::from_key_exchange(
+                        kx,
+                        &ecdh_params.public.0,
+                        Some(transcript.get_current_hash()),
+                        randoms,
+                        suite,
+                    )?;
+
+                    let (dec, enc) = secrets.make_cipher_pair(Side::Client);
+
+                    self.record_layer
+                        .prepare_message_encrypter(enc);
+                    self.record_layer
+                        .prepare_message_decrypter(dec);
+                    self.record_layer.start_encrypting();
+
+                    self.state = CommonState::Send(SendState::ClientKeyExchange {
+                        secrets,
+                        transcript,
+                    });
                 }
                 state @ CommonState::HandshakeDone => {
                     self.state = state;
@@ -330,27 +365,13 @@ impl LlConnectionCommon {
 
                 transcript.add_message(&msg);
 
-                let secrets = ConnectionSecrets::from_key_exchange(
+                self.state = CommonState::SetupEncryption {
                     kx,
-                    &ecdh_params.public.0,
-                    Some(transcript.get_current_hash()),
+                    ecdh_params,
                     randoms,
                     suite,
-                )
-                .unwrap();
-
-                let (dec, enc) = secrets.make_cipher_pair(Side::Client);
-
-                self.record_layer
-                    .prepare_message_encrypter(enc);
-                self.record_layer
-                    .prepare_message_decrypter(dec);
-                self.record_layer.start_encrypting();
-
-                self.state = CommonState::Send(SendState::ClientKeyExchange {
-                    secrets,
                     transcript,
-                });
+                };
 
                 (msg, false)
             }
