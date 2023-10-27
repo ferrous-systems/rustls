@@ -40,7 +40,7 @@ fn main() -> io::Result<()> {
 
     loop {
         let Status { discard, state } = conn
-            .process_tls_records(&mut incoming_tls)
+            .process_tls_records(&mut incoming_tls[..incoming_used])
             .unwrap();
 
         match state {

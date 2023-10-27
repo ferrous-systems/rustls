@@ -175,11 +175,7 @@ impl LlConnectionCommon {
                         state: State::MustTransmitTlsData(MustTransmitTlsData { conn: self }),
                     });
                 }
-                state @ CommonState::Expect(_)
-                    if incoming_tls[self.offset..]
-                        .iter()
-                        .all(|&b| b == 0) =>
-                {
+                state @ CommonState::Expect(_) if incoming_tls.is_empty() => {
                     self.state = state;
                     return Ok(Status {
                         discard: 0,
@@ -196,7 +192,18 @@ impl LlConnectionCommon {
                         | ExpectState::ServerHelloDone { transcript, .. } => Some(transcript),
                     };
 
-                    let message = self.read_message(incoming_tls, transcript)?;
+                    let message = match self.read_message(incoming_tls, transcript) {
+                        Ok(message) => message,
+                        Err(Error::InvalidMessage(InvalidMessage::MessageTooShort)) => {
+                            self.state = CommonState::Expect(expect_state);
+
+                            return Ok(Status {
+                                discard: 0,
+                                state: State::NeedsMoreTlsData { num_bytes: None },
+                            });
+                        }
+                        Err(err) => return Err(err),
+                    };
 
                     self.state = if let MessagePayload::Alert(alert) = message.payload {
                         if let AlertLevel::Unknown(_) = alert.level {
