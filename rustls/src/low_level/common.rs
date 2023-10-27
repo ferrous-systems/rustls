@@ -787,13 +787,13 @@ pub enum State<'c, 'i> {
 
 /// A decrypted application data record
 #[derive(Debug)]
-pub struct AppDataRecord {
+pub struct AppDataRecord<'i> {
     /// number of the bytes associated to this record that must discarded from the front of
     /// the `incoming_tls` buffer before the next `process_tls_record` call
     pub discard: NonZeroUsize,
 
     /// FIXME: docs
-    pub payload: Vec<u8>,
+    pub payload: &'i [u8],
 }
 
 /// FIXME: docs
@@ -804,21 +804,26 @@ pub struct AppDataAvailable<'c, 'i> {
     incoming_tls: Option<&'i mut [u8]>,
 }
 
-impl<'c: 'i, 'i> Iterator for AppDataAvailable<'c, 'i> {
-    type Item = Result<AppDataRecord, Error>;
-
-    fn next(&mut self) -> Option<Self::Item> {
+impl<'c, 'i> AppDataAvailable<'c, 'i> {
+    /// FIXME: docs
+    pub fn next_record<'a>(&'a mut self) -> Option<Result<AppDataRecord<'a>, Error>> {
         let offset = self.conn.offset;
+        let incoming_tls = self.incoming_tls.as_deref_mut()?;
 
         match self
             .conn
-            .read_message(self.incoming_tls.as_deref()?, None)
+            .read_message(incoming_tls, None)
         {
             Ok(msg) => match msg.payload {
-                MessagePayload::ApplicationData(payload) => Some(Ok(AppDataRecord {
-                    discard: self.conn.offset.try_into().unwrap(),
-                    payload: payload.0,
-                })),
+                MessagePayload::ApplicationData(Payload(payload)) => {
+                    let slice = &mut incoming_tls[offset..offset + payload.len()];
+                    slice.copy_from_slice(&payload);
+
+                    Some(Ok(AppDataRecord {
+                        discard: self.conn.offset.try_into().unwrap(),
+                        payload: slice,
+                    }))
+                }
                 _ => {
                     self.conn.offset = offset;
                     None
