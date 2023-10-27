@@ -174,11 +174,13 @@ impl LlConnectionCommon {
                         state: State::MustEncryptTlsData(MustEncryptTlsData { conn: self }),
                     });
                 }
-                state @ CommonState::Send(_) => {
-                    self.state = state;
+                CommonState::Send(curr_state) => {
                     return Ok(Status {
                         discard: core::mem::take(&mut self.offset),
-                        state: State::MustTransmitTlsData(MustTransmitTlsData { conn: self }),
+                        state: State::MustTransmitTlsData(MustTransmitTlsData {
+                            conn: self,
+                            curr_state,
+                        }),
                     });
                 }
                 state @ CommonState::Expect(_) if incoming_tls.is_empty() => {
@@ -502,30 +504,27 @@ impl LlConnectionCommon {
         Ok(written_bytes)
     }
 
-    fn tls_data_done(&mut self) {
-        self.state = match self.state.take() {
-            CommonState::Send(send_state) => match send_state {
-                SendState::ClientHello { transcript_buffer } => {
-                    CommonState::Expect(ExpectState::ServerHello { transcript_buffer })
-                }
-                SendState::ClientKeyExchange {
-                    secrets,
-                    transcript,
-                } => CommonState::Write(WriteState::ChangeCipherSpec {
-                    secrets,
-                    transcript,
-                }),
-                SendState::ChangeCipherSpec {
-                    secrets,
-                    transcript,
-                } => CommonState::Write(WriteState::Finished {
-                    secrets,
-                    transcript,
-                }),
-                SendState::Finished => CommonState::Expect(ExpectState::ChangeCipherSpec),
-                SendState::Alert(error) => CommonState::Poisoned(error),
-            },
-            _ => unreachable!(),
+    fn tls_data_done(&mut self, curr_state: SendState) {
+        self.state = match curr_state {
+            SendState::ClientHello { transcript_buffer } => {
+                CommonState::Expect(ExpectState::ServerHello { transcript_buffer })
+            }
+            SendState::ClientKeyExchange {
+                secrets,
+                transcript,
+            } => CommonState::Write(WriteState::ChangeCipherSpec {
+                secrets,
+                transcript,
+            }),
+            SendState::ChangeCipherSpec {
+                secrets,
+                transcript,
+            } => CommonState::Write(WriteState::Finished {
+                secrets,
+                transcript,
+            }),
+            SendState::Finished => CommonState::Expect(ExpectState::ChangeCipherSpec),
+            SendState::Alert(error) => CommonState::Poisoned(error),
         };
     }
 
@@ -938,12 +937,14 @@ impl<'c> MustEncryptTlsData<'c> {
 pub struct MustTransmitTlsData<'c> {
     /// FIXME: docs
     conn: &'c mut LlConnectionCommon,
+    /// FIXME: docs
+    curr_state: SendState,
 }
 
 impl<'c> MustTransmitTlsData<'c> {
     /// FIXME: docs
     pub fn done(self) {
-        self.conn.tls_data_done()
+        self.conn.tls_data_done(self.curr_state)
     }
 }
 
