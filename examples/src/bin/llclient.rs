@@ -81,10 +81,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             State::AppDataAvailable(mut records) => {
                 while let Some(result) = records.next_record() {
-                    let AppDataRecord {
-                        discard: _new_discard,
-                        payload,
-                    } = result?;
+                    let AppDataRecord { payload, .. } = result?;
 
                     assert_eq!(payload, b"HTTP/1.0 200 OK\r\nConnection: close\r\n\r\nHello world from rustls tlsserver\r\n");
 

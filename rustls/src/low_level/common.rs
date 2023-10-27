@@ -164,21 +164,21 @@ impl LlConnectionCommon {
                 state @ CommonState::Write(_) => {
                     self.state = state;
                     return Ok(Status {
-                        discard: 0,
+                        discard: core::mem::take(&mut self.offset),
                         state: State::MustEncryptTlsData(MustEncryptTlsData { conn: self }),
                     });
                 }
                 state @ CommonState::Send(_) => {
                     self.state = state;
                     return Ok(Status {
-                        discard: 0,
+                        discard: core::mem::take(&mut self.offset),
                         state: State::MustTransmitTlsData(MustTransmitTlsData { conn: self }),
                     });
                 }
                 state @ CommonState::Expect(_) if incoming_tls.is_empty() => {
                     self.state = state;
                     return Ok(Status {
-                        discard: 0,
+                        discard: core::mem::take(&mut self.offset),
                         state: State::NeedsMoreTlsData { num_bytes: None },
                     });
                 }
@@ -198,7 +198,7 @@ impl LlConnectionCommon {
                             self.state = CommonState::Expect(expect_state);
 
                             return Ok(Status {
-                                discard: 0,
+                                discard: core::mem::take(&mut self.offset),
                                 state: State::NeedsMoreTlsData { num_bytes: None },
                             });
                         }
@@ -268,7 +268,7 @@ impl LlConnectionCommon {
                         Ok(msg) => match msg.typ {
                             ContentType::ApplicationData => {
                                 return Ok(Status {
-                                    discard: 0,
+                                    discard: core::mem::take(&mut self.offset),
                                     state: State::AppDataAvailable(AppDataAvailable {
                                         incoming_tls: Some(incoming_tls),
                                         conn: self,
@@ -281,7 +281,7 @@ impl LlConnectionCommon {
                         },
                         Err(_) => {
                             return Ok(Status {
-                                discard: 0,
+                                discard: core::mem::take(&mut self.offset),
                                 state: State::TrafficTransit(TrafficTransit { conn: self }),
                             });
                         }
