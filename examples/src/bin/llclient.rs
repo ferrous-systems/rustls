@@ -36,7 +36,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut incoming_tls = [0; 16 * 1024];
     let mut incoming_used = 0;
 
-    let mut outgoing_tls = vec![0; 16 * 1024];
+    let mut outgoing_tls = vec![];
     let mut outgoing_used = 0;
 
     loop {
