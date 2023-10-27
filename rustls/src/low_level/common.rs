@@ -40,6 +40,17 @@ use crate::{
     SupportedCipherSuite, Tls12CipherSuite,
 };
 
+fn log_msg(msg: &Message, read: bool) {
+    let verb = if read { "Read" } else { "Write" };
+    match &msg.payload {
+        MessagePayload::Handshake {
+            parsed: HandshakeMessagePayload { typ, .. },
+            ..
+        } => std::println!("{} {:?}", verb, typ),
+        payload => std::println!("{} {:?}", verb, payload.content_type()),
+    };
+}
+
 enum ExpectState {
     ServerHello {
         transcript_buffer: HandshakeHashBuffer,
@@ -299,8 +310,14 @@ impl LlConnectionCommon {
         }
     }
 
-    fn generate_message(&mut self, write_state: WriteState) -> (Message, bool, CommonState) {
-        match write_state {
+    fn generate_message(
+        &mut self,
+        write_state: WriteState,
+    ) -> (PlainMessage, bool, usize, CommonState) {
+        let mut needs_encryption = false;
+        let mut skip_index = 0;
+
+        let (msg, next_state) = match write_state {
             WriteState::ClientHello => {
                 let support_tls12 = self
                     .config
@@ -351,12 +368,13 @@ impl LlConnectionCommon {
                     version: ProtocolVersion::TLSv1_0,
                     payload: MessagePayload::handshake(payload),
                 };
+                log_msg(&msg, false);
 
                 let mut transcript_buffer = HandshakeHashBuffer::new();
                 transcript_buffer.add_message(&msg);
                 let next_state = CommonState::Send(SendState::ClientHello { transcript_buffer });
 
-                (msg, false, next_state)
+                (msg.into(), next_state)
             }
             WriteState::ClientKeyExchange {
                 suite,
@@ -377,6 +395,7 @@ impl LlConnectionCommon {
                         payload: HandshakePayload::ClientKeyExchange(pubkey),
                     }),
                 };
+                log_msg(&msg, false);
 
                 transcript.add_message(&msg);
 
@@ -388,7 +407,7 @@ impl LlConnectionCommon {
                     transcript,
                 };
 
-                (msg, false, next_state)
+                (msg.into(), next_state)
             }
             WriteState::ChangeCipherSpec {
                 secrets,
@@ -398,6 +417,7 @@ impl LlConnectionCommon {
                     version: ProtocolVersion::TLSv1_2,
                     payload: MessagePayload::ChangeCipherSpec(ChangeCipherSpecPayload {}),
                 };
+                log_msg(&msg, false);
 
                 transcript.add_message(&msg);
                 let next_state = CommonState::Send(SendState::ChangeCipherSpec {
@@ -405,7 +425,7 @@ impl LlConnectionCommon {
                     transcript,
                 });
 
-                (msg, false, next_state)
+                (msg.into(), next_state)
             }
             WriteState::Finished {
                 mut transcript,
@@ -422,43 +442,37 @@ impl LlConnectionCommon {
                         payload: HandshakePayload::Finished(verify_data_payload),
                     }),
                 };
+                log_msg(&msg, false);
 
                 transcript.add_message(&msg);
-                let next_state = CommonState::Send(SendState::Finished);
+                needs_encryption = true;
 
-                (msg, true, next_state)
+                (msg.into(), CommonState::Send(SendState::Finished))
             }
-            WriteState::Alert { description, error } => {
-                let msg = Message::build_alert(AlertLevel::Fatal, description);
-                let next_state = CommonState::Send(SendState::Alert(error));
+            WriteState::Alert { description, error } => (
+                Message::build_alert(AlertLevel::Fatal, description).into(),
+                CommonState::Send(SendState::Alert(error)),
+            ),
+            WriteState::Retry {
+                plain_msg,
+                index,
+                needs_encryption: needs_encryption_aux,
+                next_state,
+            } => {
+                skip_index = index;
+                needs_encryption = needs_encryption_aux;
 
-                (msg, false, next_state)
+                (plain_msg, *next_state)
             }
-            WriteState::Retry { .. } => unreachable!(),
-        }
+        };
+
+        (msg, needs_encryption, skip_index, next_state)
     }
 
     fn encrypt_tls_data(&mut self, outgoing_tls: &mut [u8]) -> Result<usize, EncryptError> {
         let message_fragmenter = MessageFragmenter::default();
-        let (plain_msg, skip_index, needs_encryption, next_state) = match self.state.take() {
-            CommonState::Write(WriteState::Retry {
-                plain_msg,
-                index,
-                needs_encryption,
-                next_state,
-            }) => (plain_msg, index, needs_encryption, *next_state),
-            CommonState::Write(write_state) => {
-                let (msg, needs_encryption, next_state) = self.generate_message(write_state);
-                match msg.payload {
-                    MessagePayload::Handshake {
-                        parsed: HandshakeMessagePayload { typ, .. },
-                        ..
-                    } => std::println!("Write {:?}", typ),
-                    _ => std::println!("Write {:?}", msg.payload.content_type()),
-                };
-
-                (msg.into(), 0, needs_encryption, next_state)
-            }
+        let (plain_msg, needs_encryption, skip_index, next_state) = match self.state.take() {
+            CommonState::Write(write_state) => self.generate_message(write_state),
             _ => unreachable!(),
         };
 
@@ -575,13 +589,7 @@ impl LlConnectionCommon {
             transcript.add_message(&msg);
         }
 
-        match msg.payload {
-            MessagePayload::Handshake {
-                parsed: HandshakeMessagePayload { typ, .. },
-                ..
-            } => std::println!("Read {:?}", typ),
-            _ => std::println!("Read {:?}", msg.payload.content_type()),
-        };
+        log_msg(&msg, true);
 
         Ok(msg)
     }
