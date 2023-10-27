@@ -874,6 +874,23 @@ pub enum EncryptError {
     AlreadyEncrypted,
 }
 
+impl core::fmt::Display for EncryptError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            EncryptError::InsufficientSize(InsufficientSizeError { required_size }) => write!(
+                f,
+                "cannot encrypt due to insufficient size, {} bytes are required",
+                required_size
+            ),
+            EncryptError::AlreadyEncrypted => {
+                "cannot encrypt, data has already been encrypted".fmt(f)
+            }
+        }
+    }
+}
+
+impl std::error::Error for EncryptError {}
+
 impl<'c> MustEncryptTlsData<'c> {
     /// Encrypts a handshake record into the `outgoing_tls` buffer
     ///

@@ -1,11 +1,13 @@
 use rustls::low_level::client::LlClientConnection;
-use rustls::low_level::common::{AppDataRecord, State, Status};
+use rustls::low_level::common::{
+    AppDataRecord, EncryptError, InsufficientSizeError, State, Status,
+};
 use rustls::{ClientConfig, RootCertStore};
 use std::fs::File;
-use std::io::{self, BufReader, Read, Write};
+use std::io::{BufReader, Read, Write};
 use std::sync::Arc;
 
-fn main() -> io::Result<()> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut root_store = RootCertStore::empty();
     root_store.extend(
         webpki_roots::TLS_SERVER_ROOTS
@@ -17,7 +19,7 @@ fn main() -> io::Result<()> {
         let certfile = File::open("/home/christian/.local/share/mkcert/rootCA.pem")?;
         let mut reader = BufReader::new(certfile);
         root_store.add_parsable_certificates(
-            rustls_pemfile::certs(&mut reader).map(|result| result.unwrap()),
+            rustls_pemfile::certs(&mut reader).collect::<Result<Vec<_>, _>>()?,
         );
     }
 
@@ -27,8 +29,7 @@ fn main() -> io::Result<()> {
         .with_no_client_auth();
 
     let mut sock = std::net::TcpStream::connect("[::]:1443")?;
-    let mut conn =
-        LlClientConnection::new(Arc::new(config), "localhost".try_into().unwrap()).unwrap();
+    let mut conn = LlClientConnection::new(Arc::new(config), "localhost".try_into()?)?;
 
     // .. configure / inititiaize `conn` and `sock`
 
@@ -39,18 +40,30 @@ fn main() -> io::Result<()> {
     let mut outgoing_used = 0;
 
     loop {
-        let Status { discard, state } = conn
-            .process_tls_records(&mut incoming_tls[..incoming_used])
-            .unwrap();
+        let Status { discard, state } =
+            conn.process_tls_records(&mut incoming_tls[..incoming_used])?;
 
         match state {
             // logic similar to the one presented in the 'handling InsufficientSizeError' section is
             // used in these states
             State::MustEncryptTlsData(mut state) => {
-                let n = state
-                    .encrypt(&mut outgoing_tls)
-                    .unwrap();
-                outgoing_used += n;
+                let written = match state.encrypt(&mut outgoing_tls[outgoing_used..]) {
+                    Ok(written) => written,
+                    Err(EncryptError::InsufficientSize(InsufficientSizeError {
+                        required_size,
+                    })) => {
+                        let new_len = outgoing_used + required_size;
+                        outgoing_tls.resize(new_len, 0);
+                        eprintln!("resized `outgoing_tls` buffer to {}B", new_len);
+
+                        // don't forget to encrypt the handshake record after resizing!
+                        state
+                            .encrypt(&mut outgoing_tls[outgoing_used..])
+                            .expect("should not fail this time")
+                    }
+                    Err(err) => return Err(err.into()),
+                };
+                outgoing_used += written;
             }
             State::MustTransmitTlsData(state) => {
                 sock.write_all(&outgoing_tls[..outgoing_used])?;
@@ -71,7 +84,7 @@ fn main() -> io::Result<()> {
                     let AppDataRecord {
                         discard: _new_discard,
                         payload,
-                    } = result.unwrap();
+                    } = result?;
 
                     assert_eq!(payload, b"HTTP/1.0 200 OK\r\nConnection: close\r\n\r\nHello world from rustls tlsserver\r\n");
 
@@ -82,11 +95,8 @@ fn main() -> io::Result<()> {
             State::TrafficTransit(mut traffic_transit) => {
                 // post-handshake logic
                 let req = b"GET / HTTP/1.0\r\nHost: llclient\r\nConnection: close\r\nAccept-Encoding: identity\r\n\r\n";
-                let len = traffic_transit
-                    .encrypt(req, outgoing_tls.as_mut_slice())
-                    .unwrap();
-                sock.write_all(&outgoing_tls[..len])
-                    .unwrap();
+                let len = traffic_transit.encrypt(req, outgoing_tls.as_mut_slice())?;
+                sock.write_all(&outgoing_tls[..len])?;
 
                 let read = sock.read(&mut incoming_tls[incoming_used..])?;
                 incoming_used += read;
@@ -95,6 +105,8 @@ fn main() -> io::Result<()> {
 
         // discard TLS records
         if discard != 0 {
+            assert!(discard <= incoming_used);
+
             incoming_tls.copy_within(discard..incoming_used, 0);
             incoming_used -= discard;
         }
