@@ -1,5 +1,6 @@
 //! FIXME: docs
 
+use alloc::boxed::Box;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::ops::{Deref, DerefMut};
@@ -8,10 +9,12 @@ use std::sync::Arc;
 
 use crate::check::inappropriate_handshake_message;
 use crate::conn::ConnectionRandoms;
+use crate::crypto::ActiveKeyExchange;
 use crate::hash_hs::{HandshakeHash, HandshakeHashBuffer};
 use crate::low_level::{
     log_msg, CommonState, ExpectState, GeneratedMessage, LlConnectionCommon, SendState, WriteState,
 };
+use crate::msgs::base::{Payload, PayloadU8};
 use crate::msgs::codec::{Codec, Reader};
 use crate::msgs::enums::{Compression, ECPointFormat};
 use crate::msgs::handshake::{
@@ -328,13 +331,15 @@ impl ExpectServerHelloDone {
                             .start()
                             .map_err(|_| Error::FailedToGetRandomBytes)?;
 
-                        Ok(CommonState::Write(WriteState::ClientKeyExchange {
-                            suite: self.suite,
-                            kx,
-                            ecdh_params,
-                            randoms: self.randoms,
-                            transcript: self.transcript,
-                        }))
+                        Ok(CommonState::Write(WriteState::ClientKeyExchange(
+                            WriteClientKeyExchange {
+                                suite: self.suite,
+                                kx,
+                                ecdh_params,
+                                randoms: self.randoms,
+                                transcript: self.transcript,
+                            },
+                        )))
                     } else {
                         Ok(CommonState::Write(WriteState::Alert {
                             description: AlertDescription::IllegalParameter,
@@ -363,5 +368,42 @@ impl ExpectServerHelloDone {
 
     pub(crate) fn get_transcript_mut(&mut self) -> Option<&mut HandshakeHash> {
         Some(&mut self.transcript)
+    }
+}
+
+pub(crate) struct WriteClientKeyExchange {
+    suite: &'static Tls12CipherSuite,
+    kx: Box<dyn ActiveKeyExchange>,
+    ecdh_params: ServerEcdhParams,
+    randoms: ConnectionRandoms,
+    transcript: HandshakeHash,
+}
+impl WriteClientKeyExchange {
+    pub(crate) fn generate_message(mut self, _common: &mut LlConnectionCommon) -> GeneratedMessage {
+        let mut buf = Vec::new();
+        let ecpoint = PayloadU8::new(Vec::from(self.kx.pub_key()));
+        ecpoint.encode(&mut buf);
+        let pubkey = Payload::new(buf);
+
+        let msg = Message {
+            version: ProtocolVersion::TLSv1_2,
+            payload: MessagePayload::handshake(HandshakeMessagePayload {
+                typ: HandshakeType::ClientKeyExchange,
+                payload: HandshakePayload::ClientKeyExchange(pubkey),
+            }),
+        };
+        log_msg(&msg, false);
+
+        self.transcript.add_message(&msg);
+
+        let next_state = CommonState::SetupEncryption {
+            kx: self.kx,
+            peer_pub_key: self.ecdh_params.public.0,
+            randoms: self.randoms,
+            suite: self.suite,
+            transcript: self.transcript,
+        };
+
+        GeneratedMessage::new(msg, next_state)
     }
 }

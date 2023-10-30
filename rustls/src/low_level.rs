@@ -10,18 +10,17 @@ use std::sync::Arc;
 use crate::check::inappropriate_message;
 use crate::client::low_level::{
     ExpectCertificate, ExpectServerHello, ExpectServerHelloDone, ExpectServerKeyExchange,
-    SendClientHello, WriteClientHello,
+    SendClientHello, WriteClientHello, WriteClientKeyExchange,
 };
 use crate::conn::ConnectionRandoms;
 use crate::crypto::cipher::{OpaqueMessage, PlainMessage};
 use crate::crypto::ActiveKeyExchange;
 use crate::hash_hs::HandshakeHash;
 use crate::internal::record_layer::RecordLayer;
-use crate::msgs::base::{Payload, PayloadU8};
+use crate::msgs::base::Payload;
 use crate::msgs::ccs::ChangeCipherSpecPayload;
-use crate::msgs::codec::{Codec, Reader};
+use crate::msgs::codec::Reader;
 use crate::msgs::enums::AlertLevel;
-use crate::msgs::handshake::ServerEcdhParams;
 use crate::msgs::message::MessageError;
 use crate::tls12::ConnectionSecrets;
 use crate::{
@@ -84,13 +83,7 @@ pub(crate) enum ExpectState {
 
 pub(crate) enum WriteState {
     ClientHello(WriteClientHello),
-    ClientKeyExchange {
-        suite: &'static Tls12CipherSuite,
-        kx: Box<dyn ActiveKeyExchange>,
-        ecdh_params: ServerEcdhParams,
-        randoms: ConnectionRandoms,
-        transcript: HandshakeHash,
-    },
+    ClientKeyExchange(WriteClientKeyExchange),
     ChangeCipherSpec {
         secrets: ConnectionSecrets,
         transcript: HandshakeHash,
@@ -332,39 +325,7 @@ impl LlConnectionCommon {
     fn generate_message(&mut self, write_state: WriteState) -> GeneratedMessage {
         match write_state {
             WriteState::ClientHello(state) => state.generate_message(self),
-            WriteState::ClientKeyExchange {
-                suite,
-                kx,
-                ecdh_params,
-                randoms,
-                mut transcript,
-            } => {
-                let mut buf = Vec::new();
-                let ecpoint = PayloadU8::new(Vec::from(kx.pub_key()));
-                ecpoint.encode(&mut buf);
-                let pubkey = Payload::new(buf);
-
-                let msg = Message {
-                    version: ProtocolVersion::TLSv1_2,
-                    payload: MessagePayload::handshake(HandshakeMessagePayload {
-                        typ: HandshakeType::ClientKeyExchange,
-                        payload: HandshakePayload::ClientKeyExchange(pubkey),
-                    }),
-                };
-                log_msg(&msg, false);
-
-                transcript.add_message(&msg);
-
-                let next_state = CommonState::SetupEncryption {
-                    kx,
-                    peer_pub_key: ecdh_params.public.0,
-                    randoms,
-                    suite,
-                    transcript,
-                };
-
-                GeneratedMessage::new(msg, next_state)
-            }
+            WriteState::ClientKeyExchange(state) => state.generate_message(self),
             WriteState::ChangeCipherSpec {
                 secrets,
                 transcript,
