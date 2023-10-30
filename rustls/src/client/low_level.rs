@@ -12,7 +12,8 @@ use crate::conn::ConnectionRandoms;
 use crate::crypto::ActiveKeyExchange;
 use crate::hash_hs::{HandshakeHash, HandshakeHashBuffer};
 use crate::low_level::{
-    log_msg, CommonState, ExpectState, GeneratedMessage, LlConnectionCommon, SendState, WriteState,
+    log_msg, CommonState, ExpectState, GeneratedMessage, LlConnectionCommon, SendState, WriteAlert,
+    WriteState,
 };
 use crate::msgs::base::{Payload, PayloadU8};
 use crate::msgs::ccs::ChangeCipherSpecPayload;
@@ -186,10 +187,10 @@ impl ExpectState for ExpectServerHello {
                 transcript,
             })))
         } else {
-            Ok(CommonState::Write(WriteState::Alert {
-                description: AlertDescription::HandshakeFailure,
-                error: PeerMisbehaved::SelectedUnofferedCipherSuite.into(),
-            }))
+            Ok(CommonState::Write(WriteState::Alert(WriteAlert::new(
+                AlertDescription::HandshakeFailure,
+                PeerMisbehaved::SelectedUnofferedCipherSuite,
+            ))))
         }
     }
 }
@@ -217,14 +218,14 @@ impl ExpectState for ExpectCertificate {
             .verifier
             .verify_server_cert(&payload[0], &[], &common.name, &[], UnixTime::now())
         {
-            Ok(CommonState::Write(WriteState::Alert {
-                description: match &error {
+            Ok(CommonState::Write(WriteState::Alert(WriteAlert::new(
+                match &error {
                     Error::InvalidCertificate(e) => e.clone().into(),
                     Error::PeerMisbehaved(_) => AlertDescription::IllegalParameter,
                     _ => AlertDescription::HandshakeFailure,
                 },
                 error,
-            }))
+            ))))
         } else {
             Ok(CommonState::Expect(Box::new(ExpectServerKeyExchange {
                 suite: self.suite,
@@ -311,10 +312,10 @@ impl ExpectState for ExpectServerHelloDone {
                     let ecdh_params = ServerEcdhParams::read(&mut rd)?;
 
                     if rd.any_left() {
-                        Ok(CommonState::Write(WriteState::Alert {
-                            description: AlertDescription::DecodeError,
-                            error: InvalidMessage::InvalidDhParams.into(),
-                        }))
+                        Ok(CommonState::Write(WriteState::Alert(WriteAlert::new(
+                            AlertDescription::DecodeError,
+                            InvalidMessage::InvalidDhParams,
+                        ))))
                     } else if let Some(skxg) = common
                         .config
                         .find_kx_group(ecdh_params.curve_params.named_group)
@@ -333,17 +334,16 @@ impl ExpectState for ExpectServerHelloDone {
                             },
                         )))
                     } else {
-                        Ok(CommonState::Write(WriteState::Alert {
-                            description: AlertDescription::IllegalParameter,
-                            error: PeerMisbehaved::IllegalHelloRetryRequestWithUnofferedNamedGroup
-                                .into(),
-                        }))
+                        Ok(CommonState::Write(WriteState::Alert(WriteAlert::new(
+                            AlertDescription::IllegalParameter,
+                            PeerMisbehaved::IllegalHelloRetryRequestWithUnofferedNamedGroup,
+                        ))))
                     }
                 }
-                None => Ok(CommonState::Write(WriteState::Alert {
-                    description: AlertDescription::DecodeError,
-                    error: InvalidMessage::MissingKeyExchange.into(),
-                })),
+                None => Ok(CommonState::Write(WriteState::Alert(WriteAlert::new(
+                    AlertDescription::DecodeError,
+                    InvalidMessage::MissingKeyExchange,
+                )))),
             },
             payload => {
                 return Err(inappropriate_handshake_message(

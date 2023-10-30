@@ -83,16 +83,36 @@ pub(crate) enum WriteState {
     ClientKeyExchange(WriteClientKeyExchange),
     ChangeCipherSpec(WriteChangeCipherSpec),
     Finished(WriteFinished),
-    Alert {
-        description: AlertDescription,
-        error: Error,
-    },
+    Alert(WriteAlert),
     Retry {
         plain_msg: PlainMessage,
         index: usize,
         needs_encryption: bool,
         next_state: Box<CommonState>,
     },
+}
+
+pub(crate) struct WriteAlert {
+    description: AlertDescription,
+    error: Error,
+}
+
+impl WriteAlert {
+    pub(crate) fn new(description: AlertDescription, error: impl Into<Error>) -> Self {
+        Self {
+            description,
+            error: error.into(),
+        }
+    }
+}
+
+impl WriteAlert {
+    fn generate_message(self, _conn: &mut LlConnectionCommon) -> GeneratedMessage {
+        GeneratedMessage::new(
+            Message::build_alert(AlertLevel::Fatal, self.description),
+            CommonState::Send(Box::new(SendAlert { error: self.error })),
+        )
+    }
 }
 
 pub(crate) trait SendState {
@@ -277,10 +297,7 @@ impl LlConnectionCommon {
             WriteState::ClientKeyExchange(state) => state.generate_message(self),
             WriteState::ChangeCipherSpec(state) => state.generate_message(self),
             WriteState::Finished(state) => state.generate_message(self),
-            WriteState::Alert { description, error } => GeneratedMessage::new(
-                Message::build_alert(AlertLevel::Fatal, description),
-                CommonState::Send(Box::new(SendAlert { error })),
-            ),
+            WriteState::Alert(state) => state.generate_message(self),
             WriteState::Retry {
                 plain_msg,
                 index,
@@ -404,10 +421,10 @@ impl LlConnectionCommon {
         curr_state: CommonState,
     ) -> Result<(), Error> {
         self.state = if let AlertLevel::Unknown(_) = alert.level {
-            CommonState::Write(WriteState::Alert {
-                description: AlertDescription::IllegalParameter,
-                error: Error::AlertReceived(alert.description),
-            })
+            CommonState::Write(WriteState::Alert(WriteAlert::new(
+                AlertDescription::IllegalParameter,
+                Error::AlertReceived(alert.description),
+            )))
         } else if alert.description == AlertDescription::CloseNotify {
             CommonState::ConnectionClosed
         } else if alert.level == AlertLevel::Warning {
