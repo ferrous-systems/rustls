@@ -142,7 +142,7 @@ pub(crate) struct SendClientHello {
 
 impl SendClientHello {
     pub(crate) fn tls_data_done(self) -> CommonState {
-        CommonState::Expect(ExpectState::ServerHello(ExpectServerHello {
+        CommonState::Expect(Box::new(ExpectServerHello {
             transcript_buffer: self.transcript_buffer,
             random: self.random,
         }))
@@ -154,9 +154,9 @@ pub(crate) struct ExpectServerHello {
     random: Random,
 }
 
-impl ExpectServerHello {
-    pub(crate) fn process_message(
-        self,
+impl ExpectState for ExpectServerHello {
+    fn process_message(
+        self: Box<Self>,
         common: &mut LlConnectionCommon,
         msg: Message,
     ) -> Result<CommonState, Error> {
@@ -180,23 +180,17 @@ impl ExpectServerHello {
                 SupportedCipherSuite::Tls13(_) => todo!(),
             };
 
-            Ok(CommonState::Expect(ExpectState::Certificate(
-                ExpectCertificate {
-                    suite,
-                    randoms: ConnectionRandoms::new(self.random, payload.random),
-                    transcript,
-                },
-            )))
+            Ok(CommonState::Expect(Box::new(ExpectCertificate {
+                suite,
+                randoms: ConnectionRandoms::new(self.random, payload.random),
+                transcript,
+            })))
         } else {
             Ok(CommonState::Write(WriteState::Alert {
                 description: AlertDescription::HandshakeFailure,
                 error: PeerMisbehaved::SelectedUnofferedCipherSuite.into(),
             }))
         }
-    }
-
-    pub(crate) fn get_transcript_mut(&mut self) -> Option<&mut HandshakeHash> {
-        None
     }
 }
 
@@ -206,9 +200,9 @@ pub(crate) struct ExpectCertificate {
     transcript: HandshakeHash,
 }
 
-impl ExpectCertificate {
-    pub(crate) fn process_message(
-        self,
+impl ExpectState for ExpectCertificate {
+    fn process_message(
+        self: Box<Self>,
         common: &mut LlConnectionCommon,
         msg: Message,
     ) -> Result<CommonState, Error> {
@@ -232,17 +226,15 @@ impl ExpectCertificate {
                 error,
             }))
         } else {
-            Ok(CommonState::Expect(ExpectState::ServerKeyExchange(
-                ExpectServerKeyExchange {
-                    suite: self.suite,
-                    randoms: self.randoms,
-                    transcript: self.transcript,
-                },
-            )))
+            Ok(CommonState::Expect(Box::new(ExpectServerKeyExchange {
+                suite: self.suite,
+                randoms: self.randoms,
+                transcript: self.transcript,
+            })))
         }
     }
 
-    pub(crate) fn get_transcript_mut(&mut self) -> Option<&mut HandshakeHash> {
+    fn get_transcript_mut(&mut self) -> Option<&mut HandshakeHash> {
         Some(&mut self.transcript)
     }
 }
@@ -252,9 +244,9 @@ pub(crate) struct ExpectServerKeyExchange {
     randoms: ConnectionRandoms,
     transcript: HandshakeHash,
 }
-impl ExpectServerKeyExchange {
-    pub(crate) fn process_message(
-        self,
+impl ExpectState for ExpectServerKeyExchange {
+    fn process_message(
+        self: Box<Self>,
         _common: &mut LlConnectionCommon,
         msg: Message,
     ) -> Result<CommonState, Error> {
@@ -264,17 +256,15 @@ impl ExpectServerKeyExchange {
             HandshakePayload::ServerKeyExchange
         )?;
 
-        Ok(CommonState::Expect(ExpectState::ServerHelloDone(
-            ExpectServerHelloDone {
-                suite: self.suite,
-                randoms: self.randoms,
-                opaque_kx,
-                transcript: self.transcript,
-            },
-        )))
+        Ok(CommonState::Expect(Box::new(ExpectServerHelloDone {
+            suite: self.suite,
+            randoms: self.randoms,
+            opaque_kx,
+            transcript: self.transcript,
+        })))
     }
 
-    pub(crate) fn get_transcript_mut(&mut self) -> Option<&mut HandshakeHash> {
+    fn get_transcript_mut(&mut self) -> Option<&mut HandshakeHash> {
         Some(&mut self.transcript)
     }
 }
@@ -286,9 +276,9 @@ pub(crate) struct ExpectServerHelloDone {
     transcript: HandshakeHash,
 }
 
-impl ExpectServerHelloDone {
-    pub(crate) fn process_message(
-        self,
+impl ExpectState for ExpectServerHelloDone {
+    fn process_message(
+        self: Box<Self>,
         common: &mut LlConnectionCommon,
         msg: Message,
     ) -> Result<CommonState, Error> {
@@ -300,7 +290,7 @@ impl ExpectServerHelloDone {
                         payload: HandshakePayload::CertificateRequest(_),
                     },
                 ..
-            } => Ok(CommonState::Expect(ExpectState::ServerHelloDone(self))),
+            } => Ok(CommonState::Expect(self)),
             MessagePayload::Handshake {
                 parsed:
                     HandshakeMessagePayload {
@@ -368,7 +358,7 @@ impl ExpectServerHelloDone {
         }
     }
 
-    pub(crate) fn get_transcript_mut(&mut self) -> Option<&mut HandshakeHash> {
+    fn get_transcript_mut(&mut self) -> Option<&mut HandshakeHash> {
         Some(&mut self.transcript)
     }
 }
@@ -538,7 +528,7 @@ pub(crate) struct SendFinished {
 
 impl SendFinished {
     pub(crate) fn tls_data_done(self) -> CommonState {
-        CommonState::Expect(ExpectState::ChangeCipherSpec(ExpectChangeCipherSpec {
+        CommonState::Expect(Box::new(ExpectChangeCipherSpec {
             transcript: self.transcript,
         }))
     }
@@ -548,16 +538,16 @@ pub(crate) struct ExpectChangeCipherSpec {
     transcript: HandshakeHash,
 }
 
-impl ExpectChangeCipherSpec {
-    pub(crate) fn process_message(
-        self,
+impl ExpectState for ExpectChangeCipherSpec {
+    fn process_message(
+        self: Box<Self>,
         common: &mut LlConnectionCommon,
         msg: Message,
     ) -> Result<CommonState, Error> {
         match msg.payload {
             MessagePayload::ChangeCipherSpec(_) => {
                 common.record_layer.start_decrypting();
-                Ok(CommonState::Expect(ExpectState::Finished(ExpectFinished {
+                Ok(CommonState::Expect(Box::new(ExpectFinished {
                     transcript: self.transcript,
                 })))
             }
@@ -567,18 +557,15 @@ impl ExpectChangeCipherSpec {
             )),
         }
     }
-
-    pub(crate) fn get_transcript_mut(&mut self) -> Option<&mut HandshakeHash> {
-        None
-    }
 }
 
 pub(crate) struct ExpectFinished {
     transcript: HandshakeHash,
 }
-impl ExpectFinished {
-    pub(crate) fn process_message(
-        self,
+
+impl ExpectState for ExpectFinished {
+    fn process_message(
+        self: Box<Self>,
         _common: &mut LlConnectionCommon,
         msg: Message,
     ) -> Result<CommonState, Error> {
@@ -587,7 +574,7 @@ impl ExpectFinished {
         Ok(CommonState::HandshakeDone)
     }
 
-    pub(crate) fn get_transcript_mut(&mut self) -> Option<&mut HandshakeHash> {
+    fn get_transcript_mut(&mut self) -> Option<&mut HandshakeHash> {
         Some(&mut self.transcript)
     }
 }

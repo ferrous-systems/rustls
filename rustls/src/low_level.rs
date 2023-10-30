@@ -7,10 +7,9 @@ use alloc::boxed::Box;
 use std::sync::Arc;
 
 use crate::client::low_level::{
-    ExpectCertificate, ExpectChangeCipherSpec, ExpectFinished, ExpectServerHello,
-    ExpectServerHelloDone, ExpectServerKeyExchange, SendChangeCipherSpec, SendClientHello,
-    SendClientKeyExchange, SendFinished, SetupClientEncryption, WriteChangeCipherSpec,
-    WriteClientHello, WriteClientKeyExchange, WriteFinished,
+    SendChangeCipherSpec, SendClientHello, SendClientKeyExchange, SendFinished,
+    SetupClientEncryption, WriteChangeCipherSpec, WriteClientHello, WriteClientKeyExchange,
+    WriteFinished,
 };
 use crate::crypto::cipher::{OpaqueMessage, PlainMessage};
 use crate::hash_hs::HandshakeHash;
@@ -68,13 +67,16 @@ impl GeneratedMessage {
     }
 }
 
-pub(crate) enum ExpectState {
-    ServerHello(ExpectServerHello),
-    Certificate(ExpectCertificate),
-    ServerKeyExchange(ExpectServerKeyExchange),
-    ServerHelloDone(ExpectServerHelloDone),
-    ChangeCipherSpec(ExpectChangeCipherSpec),
-    Finished(ExpectFinished),
+pub(crate) trait ExpectState {
+    fn process_message(
+        self: Box<Self>,
+        common: &mut LlConnectionCommon,
+        msg: Message,
+    ) -> Result<CommonState, Error>;
+
+    fn get_transcript_mut(&mut self) -> Option<&mut HandshakeHash> {
+        None
+    }
 }
 
 pub(crate) enum WriteState {
@@ -106,9 +108,9 @@ pub(crate) enum CommonState {
     Unreachable,
     Process {
         message: Message,
-        expect_state: ExpectState,
+        expect_state: Box<dyn ExpectState>,
     },
-    Expect(ExpectState),
+    Expect(Box<dyn ExpectState>),
     Write(WriteState),
     Send(SendState),
     SetupClientEncryption(SetupClientEncryption),
@@ -187,15 +189,7 @@ impl LlConnectionCommon {
                     });
                 }
                 CommonState::Expect(mut expect_state) => {
-                    let transcript = match &mut expect_state {
-                        ExpectState::ChangeCipherSpec(state) => state.get_transcript_mut(),
-                        ExpectState::Finished(state) => state.get_transcript_mut(),
-                        ExpectState::ServerHello(state) => state.get_transcript_mut(),
-                        ExpectState::Certificate(state) => state.get_transcript_mut(),
-                        ExpectState::ServerKeyExchange(state) => state.get_transcript_mut(),
-                        ExpectState::ServerHelloDone(state) => state.get_transcript_mut(),
-                    };
-
+                    let transcript = expect_state.get_transcript_mut();
                     let message = match self.read_message(incoming_tls, transcript) {
                         Ok(message) => message,
                         Err(Error::InvalidMessage(InvalidMessage::MessageTooShort)) => {
@@ -222,21 +216,7 @@ impl LlConnectionCommon {
                     message,
                     expect_state,
                 } => {
-                    self.state = match expect_state {
-                        ExpectState::ServerHello(state) => state.process_message(self, message)?,
-
-                        ExpectState::Certificate(state) => state.process_message(self, message)?,
-                        ExpectState::ServerKeyExchange(state) => {
-                            state.process_message(self, message)?
-                        }
-                        ExpectState::ServerHelloDone(state) => {
-                            state.process_message(self, message)?
-                        }
-                        ExpectState::ChangeCipherSpec(state) => {
-                            state.process_message(self, message)?
-                        }
-                        ExpectState::Finished(state) => state.process_message(self, message)?,
-                    };
+                    self.state = expect_state.process_message(self, message)?;
                 }
                 CommonState::SetupClientEncryption(state) => {
                     self.state = state.setup_encryption(self)?;
