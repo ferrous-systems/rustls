@@ -46,7 +46,7 @@ fn log_msg(msg: &Message, read: bool) {
         MessagePayload::Handshake {
             parsed: HandshakeMessagePayload { typ, .. },
             ..
-        } => std::println!("{} {:?}", verb, typ),
+        } => std::println!("{} Handshake::{:?}", verb, typ),
         payload => std::println!("{} {:?}", verb, payload.content_type()),
     };
 }
@@ -72,8 +72,12 @@ enum ExpectState {
         randoms: ConnectionRandoms,
         transcript: HandshakeHash,
     },
-    ChangeCipherSpec,
-    Finished,
+    ChangeCipherSpec {
+        transcript: HandshakeHash,
+    },
+    Finished {
+        transcript: HandshakeHash,
+    },
 }
 
 enum WriteState {
@@ -120,7 +124,9 @@ enum SendState {
         secrets: ConnectionSecrets,
         transcript: HandshakeHash,
     },
-    Finished,
+    Finished {
+        transcript: HandshakeHash,
+    },
     Alert(Error),
 }
 
@@ -209,12 +215,13 @@ impl LlConnectionCommon {
                 }
                 CommonState::Expect(mut expect_state) => {
                     let transcript = match &mut expect_state {
-                        ExpectState::ServerHello { .. }
-                        | ExpectState::ChangeCipherSpec
-                        | ExpectState::Finished => None,
+                        ExpectState::ServerHello { .. } | ExpectState::ChangeCipherSpec { .. } => {
+                            None
+                        }
                         ExpectState::Certificate { transcript, .. }
                         | ExpectState::ServerKeyExchange { transcript, .. }
-                        | ExpectState::ServerHelloDone { transcript, .. } => Some(transcript),
+                        | ExpectState::ServerHelloDone { transcript, .. }
+                        | ExpectState::Finished { transcript } => Some(transcript),
                     };
 
                     let message = match self.read_message(incoming_tls, transcript) {
@@ -408,7 +415,7 @@ impl LlConnectionCommon {
             }
             WriteState::ChangeCipherSpec {
                 secrets,
-                mut transcript,
+                transcript,
             } => {
                 let msg = Message {
                     version: ProtocolVersion::TLSv1_2,
@@ -416,7 +423,6 @@ impl LlConnectionCommon {
                 };
                 log_msg(&msg, false);
 
-                transcript.add_message(&msg);
                 let next_state = CommonState::Send(SendState::ChangeCipherSpec {
                     secrets,
                     transcript,
@@ -444,7 +450,10 @@ impl LlConnectionCommon {
                 transcript.add_message(&msg);
                 needs_encryption = true;
 
-                (msg.into(), CommonState::Send(SendState::Finished))
+                (
+                    msg.into(),
+                    CommonState::Send(SendState::Finished { transcript }),
+                )
             }
             WriteState::Alert { description, error } => (
                 Message::build_alert(AlertLevel::Fatal, description).into(),
@@ -538,7 +547,9 @@ impl LlConnectionCommon {
                 secrets,
                 transcript,
             }),
-            SendState::Finished => CommonState::Expect(ExpectState::ChangeCipherSpec),
+            SendState::Finished { transcript } => {
+                CommonState::Expect(ExpectState::ChangeCipherSpec { transcript })
+            }
             SendState::Alert(error) => CommonState::Poisoned(error),
         };
     }
@@ -767,10 +778,10 @@ impl LlConnectionCommon {
                     }
                 }
             }
-            ExpectState::ChangeCipherSpec => match msg.payload {
+            ExpectState::ChangeCipherSpec { transcript } => match msg.payload {
                 MessagePayload::ChangeCipherSpec(_) => {
                     self.record_layer.start_decrypting();
-                    CommonState::Expect(ExpectState::Finished)
+                    CommonState::Expect(ExpectState::Finished { transcript })
                 }
                 payload => {
                     return Err(inappropriate_message(
@@ -779,7 +790,7 @@ impl LlConnectionCommon {
                     ));
                 }
             },
-            ExpectState::Finished => {
+            ExpectState::Finished { .. } => {
                 let _ = require_handshake_msg!(
                     msg,
                     HandshakeType::Finished,
