@@ -9,13 +9,13 @@ use std::sync::Arc;
 use crate::check::inappropriate_message;
 use crate::client::low_level::{
     ExpectCertificate, ExpectServerHello, ExpectServerHelloDone, ExpectServerKeyExchange,
-    SendClientHello, SetupClientEncryption, WriteClientHello, WriteClientKeyExchange, SendClientKeyExchange,
+    SendClientHello, SendClientKeyExchange, SetupClientEncryption, WriteChangeCipherSpec,
+    WriteClientHello, WriteClientKeyExchange,
 };
 use crate::crypto::cipher::{OpaqueMessage, PlainMessage};
 use crate::hash_hs::HandshakeHash;
 use crate::internal::record_layer::RecordLayer;
 use crate::msgs::base::Payload;
-use crate::msgs::ccs::ChangeCipherSpecPayload;
 use crate::msgs::codec::Reader;
 use crate::msgs::enums::AlertLevel;
 use crate::msgs::message::MessageError;
@@ -81,10 +81,7 @@ pub(crate) enum ExpectState {
 pub(crate) enum WriteState {
     ClientHello(WriteClientHello),
     ClientKeyExchange(WriteClientKeyExchange),
-    ChangeCipherSpec {
-        secrets: ConnectionSecrets,
-        transcript: HandshakeHash,
-    },
+    ChangeCipherSpec(WriteChangeCipherSpec),
     Finished {
         secrets: ConnectionSecrets,
         transcript: HandshakeHash,
@@ -289,23 +286,8 @@ impl LlConnectionCommon {
         match write_state {
             WriteState::ClientHello(state) => state.generate_message(self),
             WriteState::ClientKeyExchange(state) => state.generate_message(self),
-            WriteState::ChangeCipherSpec {
-                secrets,
-                transcript,
-            } => {
-                let msg = Message {
-                    version: ProtocolVersion::TLSv1_2,
-                    payload: MessagePayload::ChangeCipherSpec(ChangeCipherSpecPayload {}),
-                };
-                log_msg(&msg, false);
+            WriteState::ChangeCipherSpec(state) => state.generate_message(self),
 
-                let next_state = CommonState::Send(SendState::ChangeCipherSpec {
-                    secrets,
-                    transcript,
-                });
-
-                GeneratedMessage::new(msg, next_state)
-            }
             WriteState::Finished {
                 mut transcript,
                 secrets,

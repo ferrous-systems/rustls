@@ -15,6 +15,7 @@ use crate::low_level::{
     log_msg, CommonState, ExpectState, GeneratedMessage, LlConnectionCommon, SendState, WriteState,
 };
 use crate::msgs::base::{Payload, PayloadU8};
+use crate::msgs::ccs::ChangeCipherSpecPayload;
 use crate::msgs::codec::{Codec, Reader};
 use crate::msgs::enums::{Compression, ECPointFormat};
 use crate::msgs::handshake::{
@@ -458,9 +459,30 @@ pub(crate) struct SendClientKeyExchange {
 
 impl SendClientKeyExchange {
     pub(crate) fn tls_data_done(self) -> CommonState {
-        CommonState::Write(WriteState::ChangeCipherSpec {
+        CommonState::Write(WriteState::ChangeCipherSpec(WriteChangeCipherSpec {
             secrets: self.secrets,
             transcript: self.transcript,
-        })
+        }))
+    }
+}
+
+pub(crate) struct WriteChangeCipherSpec {
+    secrets: ConnectionSecrets,
+    transcript: HandshakeHash,
+}
+impl WriteChangeCipherSpec {
+    pub(crate) fn generate_message(self, _common: &mut LlConnectionCommon) -> GeneratedMessage {
+        let msg = Message {
+            version: ProtocolVersion::TLSv1_2,
+            payload: MessagePayload::ChangeCipherSpec(ChangeCipherSpecPayload {}),
+        };
+        log_msg(&msg, false);
+
+        let next_state = CommonState::Send(SendState::ChangeCipherSpec {
+            secrets: self.secrets,
+            transcript: self.transcript,
+        });
+
+        GeneratedMessage::new(msg, next_state)
     }
 }
