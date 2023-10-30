@@ -22,9 +22,10 @@ use crate::msgs::handshake::{
     HandshakePayload, Random, ServerEcdhParams, ServerKeyExchangePayload, SessionId,
 };
 use crate::msgs::message::{Message, MessagePayload};
+use crate::tls12::ConnectionSecrets;
 use crate::{
     AlertDescription, ClientConfig, ContentType, Error, HandshakeType, InvalidMessage,
-    PeerMisbehaved, ProtocolVersion, ServerName, SupportedCipherSuite, Tls12CipherSuite,
+    PeerMisbehaved, ProtocolVersion, ServerName, Side, SupportedCipherSuite, Tls12CipherSuite,
 };
 
 use super::tls12::ServerKxDetails;
@@ -396,14 +397,54 @@ impl WriteClientKeyExchange {
 
         self.transcript.add_message(&msg);
 
-        let next_state = CommonState::SetupEncryption {
+        let next_state = CommonState::SetupClientEncryption(SetupClientEncryption {
             kx: self.kx,
             peer_pub_key: self.ecdh_params.public.0,
             randoms: self.randoms,
             suite: self.suite,
             transcript: self.transcript,
-        };
+        });
 
         GeneratedMessage::new(msg, next_state)
+    }
+}
+
+pub(crate) struct SetupClientEncryption {
+    kx: Box<dyn ActiveKeyExchange>,
+    peer_pub_key: Vec<u8>,
+    randoms: ConnectionRandoms,
+    suite: &'static Tls12CipherSuite,
+    transcript: HandshakeHash,
+}
+
+impl SetupClientEncryption {
+    pub(crate) fn setup_encryption(
+        self,
+        common: &mut LlConnectionCommon,
+    ) -> Result<CommonState, Error> {
+        {
+            let secrets = ConnectionSecrets::from_key_exchange(
+                self.kx,
+                &self.peer_pub_key,
+                Some(self.transcript.get_current_hash()),
+                self.randoms,
+                self.suite,
+            )?;
+
+            let (dec, enc) = secrets.make_cipher_pair(Side::Client);
+
+            common
+                .record_layer
+                .prepare_message_encrypter(enc);
+            common
+                .record_layer
+                .prepare_message_decrypter(dec);
+            common.record_layer.start_encrypting();
+
+            Ok(CommonState::Send(SendState::ClientKeyExchange {
+                secrets,
+                transcript: self.transcript,
+            }))
+        }
     }
 }

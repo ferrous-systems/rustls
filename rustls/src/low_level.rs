@@ -4,17 +4,14 @@ use core::num::NonZeroUsize;
 
 use alloc::boxed::Box;
 
-use alloc::vec::Vec;
 use std::sync::Arc;
 
 use crate::check::inappropriate_message;
 use crate::client::low_level::{
     ExpectCertificate, ExpectServerHello, ExpectServerHelloDone, ExpectServerKeyExchange,
-    SendClientHello, WriteClientHello, WriteClientKeyExchange,
+    SendClientHello, SetupClientEncryption, WriteClientHello, WriteClientKeyExchange,
 };
-use crate::conn::ConnectionRandoms;
 use crate::crypto::cipher::{OpaqueMessage, PlainMessage};
-use crate::crypto::ActiveKeyExchange;
 use crate::hash_hs::HandshakeHash;
 use crate::internal::record_layer::RecordLayer;
 use crate::msgs::base::Payload;
@@ -31,7 +28,7 @@ use crate::{
     },
     ClientConfig, Error, HandshakeType, ProtocolVersion,
 };
-use crate::{AlertDescription, ContentType, InvalidMessage, ServerName, Side, Tls12CipherSuite};
+use crate::{AlertDescription, ContentType, InvalidMessage, ServerName};
 
 pub(crate) fn log_msg(msg: &Message, read: bool) {
     let verb = if read { "Read" } else { "Write" };
@@ -129,13 +126,7 @@ pub(crate) enum CommonState {
     Expect(ExpectState),
     Write(WriteState),
     Send(SendState),
-    SetupEncryption {
-        kx: Box<dyn ActiveKeyExchange>,
-        peer_pub_key: Vec<u8>,
-        randoms: ConnectionRandoms,
-        suite: &'static Tls12CipherSuite,
-        transcript: HandshakeHash,
-    },
+    SetupClientEncryption(SetupClientEncryption),
     HandshakeDone,
     Poisoned(Error),
     ConnectionClosed,
@@ -249,33 +240,8 @@ impl LlConnectionCommon {
                 } => {
                     self.state = self.process_message(expect_state, message)?;
                 }
-                CommonState::SetupEncryption {
-                    kx,
-                    peer_pub_key,
-                    randoms,
-                    suite,
-                    transcript,
-                } => {
-                    let secrets = ConnectionSecrets::from_key_exchange(
-                        kx,
-                        &peer_pub_key,
-                        Some(transcript.get_current_hash()),
-                        randoms,
-                        suite,
-                    )?;
-
-                    let (dec, enc) = secrets.make_cipher_pair(Side::Client);
-
-                    self.record_layer
-                        .prepare_message_encrypter(enc);
-                    self.record_layer
-                        .prepare_message_decrypter(dec);
-                    self.record_layer.start_encrypting();
-
-                    self.state = CommonState::Send(SendState::ClientKeyExchange {
-                        secrets,
-                        transcript,
-                    });
+                CommonState::SetupClientEncryption(state) => {
+                    self.state = state.setup_encryption(self)?;
                 }
                 state @ CommonState::HandshakeDone => {
                     let mut reader = Reader::init(&incoming_tls[self.offset..]);
