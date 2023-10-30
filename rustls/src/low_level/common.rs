@@ -54,6 +54,7 @@ fn log_msg(msg: &Message, read: bool) {
 enum ExpectState {
     ServerHello {
         transcript_buffer: HandshakeHashBuffer,
+        random: Random,
     },
     Certificate {
         suite: &'static Tls12CipherSuite,
@@ -76,7 +77,9 @@ enum ExpectState {
 }
 
 enum WriteState {
-    ClientHello,
+    ClientHello {
+        random: Random,
+    },
     ClientKeyExchange {
         suite: &'static Tls12CipherSuite,
         kx: Box<dyn ActiveKeyExchange>,
@@ -107,6 +110,7 @@ enum WriteState {
 enum SendState {
     ClientHello {
         transcript_buffer: HandshakeHashBuffer,
+        random: Random,
     },
     ClientKeyExchange {
         secrets: ConnectionSecrets,
@@ -152,7 +156,6 @@ pub struct LlConnectionCommon {
     name: ServerName,
     state: CommonState,
     record_layer: RecordLayer,
-    random: Random,
     offset: usize,
 }
 
@@ -160,10 +163,11 @@ impl LlConnectionCommon {
     /// FIXME: docs
     pub fn new(config: Arc<ClientConfig>, name: ServerName) -> Result<Self, Error> {
         Ok(Self {
-            random: Random::new(config.provider)?,
+            state: CommonState::Write(WriteState::ClientHello {
+                random: Random::new(config.provider)?,
+            }),
             config,
             name,
-            state: CommonState::Write(WriteState::ClientHello),
             record_layer: RecordLayer::new(),
             offset: 0,
         })
@@ -320,7 +324,7 @@ impl LlConnectionCommon {
         let mut skip_index = 0;
 
         let (msg, next_state) = match write_state {
-            WriteState::ClientHello => {
+            WriteState::ClientHello { random } => {
                 let support_tls12 = self
                     .config
                     .supports_version(ProtocolVersion::TLSv1_2);
@@ -334,7 +338,7 @@ impl LlConnectionCommon {
                     typ: HandshakeType::ClientHello,
                     payload: HandshakePayload::ClientHello(ClientHelloPayload {
                         client_version: ProtocolVersion::TLSv1_2,
-                        random: self.random,
+                        random,
                         session_id: SessionId::empty(),
                         cipher_suites: self
                             .config
@@ -374,7 +378,10 @@ impl LlConnectionCommon {
 
                 let mut transcript_buffer = HandshakeHashBuffer::new();
                 transcript_buffer.add_message(&msg);
-                let next_state = CommonState::Send(SendState::ClientHello { transcript_buffer });
+                let next_state = CommonState::Send(SendState::ClientHello {
+                    transcript_buffer,
+                    random,
+                });
 
                 (msg.into(), next_state)
             }
@@ -522,9 +529,13 @@ impl LlConnectionCommon {
 
     fn tls_data_done(&mut self, curr_state: SendState) {
         self.state = match curr_state {
-            SendState::ClientHello { transcript_buffer } => {
-                CommonState::Expect(ExpectState::ServerHello { transcript_buffer })
-            }
+            SendState::ClientHello {
+                transcript_buffer,
+                random,
+            } => CommonState::Expect(ExpectState::ServerHello {
+                transcript_buffer,
+                random,
+            }),
             SendState::ClientKeyExchange {
                 secrets,
                 transcript,
@@ -602,7 +613,10 @@ impl LlConnectionCommon {
         msg: Message,
     ) -> Result<CommonState, Error> {
         let state = match expect_state {
-            ExpectState::ServerHello { transcript_buffer } => {
+            ExpectState::ServerHello {
+                transcript_buffer,
+                random,
+            } => {
                 let payload = require_handshake_msg!(
                     msg,
                     HandshakeType::ServerHello,
@@ -623,7 +637,7 @@ impl LlConnectionCommon {
 
                     CommonState::Expect(ExpectState::Certificate {
                         suite,
-                        randoms: ConnectionRandoms::new(self.random, payload.random),
+                        randoms: ConnectionRandoms::new(random, payload.random),
                         transcript,
                     })
                 } else {
