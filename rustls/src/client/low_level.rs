@@ -524,10 +524,22 @@ impl WriteFinished {
 
         GeneratedMessage::new(
             msg,
-            CommonState::Send(SendState::Finished {
+            CommonState::Send(SendState::Finished(SendFinished {
                 transcript: self.transcript,
-            }),
+            })),
         )
         .require_encryption(true)
+    }
+}
+
+pub(crate) struct SendFinished {
+    transcript: HandshakeHash,
+}
+
+impl SendFinished {
+    pub(crate) fn tls_data_done(self) -> CommonState {
+        CommonState::Expect(ExpectState::ChangeCipherSpec {
+            transcript: self.transcript,
+        })
     }
 }
