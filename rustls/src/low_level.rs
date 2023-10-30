@@ -9,12 +9,12 @@ use pki_types::UnixTime;
 use std::sync::Arc;
 
 use crate::check::{inappropriate_handshake_message, inappropriate_message};
-use crate::client::low_level::{WriteClientHello, SendClientHello};
+use crate::client::low_level::{ExpectServerHello, SendClientHello, WriteClientHello};
 use crate::client::tls12::ServerKxDetails;
 use crate::conn::ConnectionRandoms;
 use crate::crypto::cipher::{OpaqueMessage, PlainMessage};
 use crate::crypto::ActiveKeyExchange;
-use crate::hash_hs::{HandshakeHash, HandshakeHashBuffer};
+use crate::hash_hs::HandshakeHash;
 use crate::internal::record_layer::RecordLayer;
 use crate::msgs::base::{Payload, PayloadU8};
 use crate::msgs::ccs::ChangeCipherSpecPayload;
@@ -26,14 +26,14 @@ use crate::tls12::ConnectionSecrets;
 use crate::{
     msgs::{
         fragmenter::MessageFragmenter,
-        handshake::{HandshakeMessagePayload, HandshakePayload, Random},
+        handshake::{HandshakeMessagePayload, HandshakePayload},
         message::{Message, MessagePayload},
     },
     ClientConfig, Error, HandshakeType, ProtocolVersion,
 };
 use crate::{
     AlertDescription, ContentType, InvalidMessage, PeerMisbehaved, ServerName, Side,
-    SupportedCipherSuite, Tls12CipherSuite,
+    Tls12CipherSuite,
 };
 
 pub(crate) fn log_msg(msg: &Message, read: bool) {
@@ -76,10 +76,7 @@ impl GeneratedMessage {
 }
 
 pub(crate) enum ExpectState {
-    ServerHello {
-        transcript_buffer: HandshakeHashBuffer,
-        random: Random,
-    },
+    ServerHello(ExpectServerHello),
     Certificate {
         suite: &'static Tls12CipherSuite,
         randoms: ConnectionRandoms,
@@ -577,40 +574,8 @@ impl LlConnectionCommon {
         msg: Message,
     ) -> Result<CommonState, Error> {
         let state = match expect_state {
-            ExpectState::ServerHello {
-                transcript_buffer,
-                random,
-            } => {
-                let payload = require_handshake_msg!(
-                    msg,
-                    HandshakeType::ServerHello,
-                    HandshakePayload::ServerHello
-                )?;
-                if let Some(suite) = self
-                    .config
-                    .find_cipher_suite(payload.cipher_suite)
-                {
-                    let mut transcript = transcript_buffer.start_hash(suite.hash_provider());
+            ExpectState::ServerHello(state) => state.process_message(self, msg)?,
 
-                    transcript.add_message(&msg);
-
-                    let suite = match suite {
-                        SupportedCipherSuite::Tls12(suite) => suite,
-                        SupportedCipherSuite::Tls13(_) => todo!(),
-                    };
-
-                    CommonState::Expect(ExpectState::Certificate {
-                        suite,
-                        randoms: ConnectionRandoms::new(random, payload.random),
-                        transcript,
-                    })
-                } else {
-                    CommonState::Write(WriteState::Alert {
-                        description: AlertDescription::HandshakeFailure,
-                        error: PeerMisbehaved::SelectedUnofferedCipherSuite.into(),
-                    })
-                }
-            }
             ExpectState::Certificate {
                 suite,
                 randoms,
