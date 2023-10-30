@@ -3,12 +3,13 @@
 use core::num::NonZeroUsize;
 
 use alloc::boxed::Box;
-use alloc::vec;
+
 use alloc::vec::Vec;
 use pki_types::UnixTime;
 use std::sync::Arc;
 
 use crate::check::{inappropriate_handshake_message, inappropriate_message};
+use crate::client::low_level::WriteClientHello;
 use crate::client::tls12::ServerKxDetails;
 use crate::conn::ConnectionRandoms;
 use crate::crypto::cipher::{OpaqueMessage, PlainMessage};
@@ -18,19 +19,14 @@ use crate::internal::record_layer::RecordLayer;
 use crate::msgs::base::{Payload, PayloadU8};
 use crate::msgs::ccs::ChangeCipherSpecPayload;
 use crate::msgs::codec::{Codec, Reader};
-use crate::msgs::enums::{AlertLevel, ECPointFormat};
-use crate::msgs::handshake::{
-    CertificateStatusRequest, ClientExtension, ServerEcdhParams, ServerKeyExchangePayload,
-};
+use crate::msgs::enums::AlertLevel;
+use crate::msgs::handshake::{ServerEcdhParams, ServerKeyExchangePayload};
 use crate::msgs::message::MessageError;
 use crate::tls12::ConnectionSecrets;
 use crate::{
     msgs::{
-        enums::Compression,
         fragmenter::MessageFragmenter,
-        handshake::{
-            ClientHelloPayload, HandshakeMessagePayload, HandshakePayload, Random, SessionId,
-        },
+        handshake::{HandshakeMessagePayload, HandshakePayload, Random},
         message::{Message, MessagePayload},
     },
     ClientConfig, Error, HandshakeType, ProtocolVersion,
@@ -40,7 +36,7 @@ use crate::{
     SupportedCipherSuite, Tls12CipherSuite,
 };
 
-fn log_msg(msg: &Message, read: bool) {
+pub(crate) fn log_msg(msg: &Message, read: bool) {
     let verb = if read { "Read" } else { "Write" };
     match &msg.payload {
         MessagePayload::Handshake {
@@ -51,7 +47,35 @@ fn log_msg(msg: &Message, read: bool) {
     };
 }
 
-enum ExpectState {
+pub(crate) struct GeneratedMessage {
+    plain_msg: PlainMessage,
+    needs_encryption: bool,
+    skip_index: usize,
+    next_state: CommonState,
+}
+
+impl GeneratedMessage {
+    pub(crate) fn new(plain_msg: impl Into<PlainMessage>, next_state: CommonState) -> Self {
+        Self {
+            plain_msg: plain_msg.into(),
+            needs_encryption: false,
+            skip_index: 0,
+            next_state,
+        }
+    }
+
+    pub(crate) fn require_encryption(mut self, needs_encryption: bool) -> Self {
+        self.needs_encryption = needs_encryption;
+        self
+    }
+
+    pub(crate) fn skip(mut self, index: usize) -> Self {
+        self.skip_index = index;
+        self
+    }
+}
+
+pub(crate) enum ExpectState {
     ServerHello {
         transcript_buffer: HandshakeHashBuffer,
         random: Random,
@@ -80,10 +104,8 @@ enum ExpectState {
     },
 }
 
-enum WriteState {
-    ClientHello {
-        random: Random,
-    },
+pub(crate) enum WriteState {
+    ClientHello(WriteClientHello),
     ClientKeyExchange {
         suite: &'static Tls12CipherSuite,
         kx: Box<dyn ActiveKeyExchange>,
@@ -111,7 +133,7 @@ enum WriteState {
     },
 }
 
-enum SendState {
+pub(crate) enum SendState {
     ClientHello {
         transcript_buffer: HandshakeHashBuffer,
         random: Random,
@@ -130,7 +152,7 @@ enum SendState {
     Alert(Error),
 }
 
-enum CommonState {
+pub(crate) enum CommonState {
     Unreachable,
     Process {
         message: Message,
@@ -159,20 +181,20 @@ impl CommonState {
 
 /// both `LlClientConnection` and `LlServerConnection` implement `DerefMut<Target = LlConnectionCommon>`
 pub struct LlConnectionCommon {
-    config: Arc<ClientConfig>,
-    name: ServerName,
-    state: CommonState,
-    record_layer: RecordLayer,
-    offset: usize,
+    pub(crate) config: Arc<ClientConfig>,
+    pub(crate) name: ServerName,
+    pub(crate) state: CommonState,
+    pub(crate) record_layer: RecordLayer,
+    pub(crate) offset: usize,
 }
 
 impl LlConnectionCommon {
     /// FIXME: docs
     pub fn new(config: Arc<ClientConfig>, name: ServerName) -> Result<Self, Error> {
         Ok(Self {
-            state: CommonState::Write(WriteState::ClientHello {
-                random: Random::new(config.provider)?,
-            }),
+            state: CommonState::Write(WriteState::ClientHello(WriteClientHello::new(
+                config.as_ref(),
+            )?)),
             config,
             name,
             record_layer: RecordLayer::new(),
@@ -332,75 +354,9 @@ impl LlConnectionCommon {
         }
     }
 
-    fn generate_message(
-        &mut self,
-        write_state: WriteState,
-    ) -> (PlainMessage, bool, usize, CommonState) {
-        let mut needs_encryption = false;
-        let mut skip_index = 0;
-
-        let (msg, next_state) = match write_state {
-            WriteState::ClientHello { random } => {
-                let support_tls12 = self
-                    .config
-                    .supports_version(ProtocolVersion::TLSv1_2);
-
-                let mut supported_versions = Vec::new();
-                if support_tls12 {
-                    supported_versions.push(ProtocolVersion::TLSv1_2);
-                }
-
-                let payload = HandshakeMessagePayload {
-                    typ: HandshakeType::ClientHello,
-                    payload: HandshakePayload::ClientHello(ClientHelloPayload {
-                        client_version: ProtocolVersion::TLSv1_2,
-                        random,
-                        session_id: SessionId::empty(),
-                        cipher_suites: self
-                            .config
-                            .cipher_suites
-                            .iter()
-                            .map(|cs| cs.suite())
-                            .collect(),
-                        compression_methods: vec![Compression::Null],
-                        extensions: vec![
-                            ClientExtension::SupportedVersions(supported_versions),
-                            ClientExtension::EcPointFormats(ECPointFormat::SUPPORTED.to_vec()),
-                            ClientExtension::NamedGroups(
-                                self.config
-                                    .kx_groups
-                                    .iter()
-                                    .map(|skxg| skxg.name())
-                                    .collect(),
-                            ),
-                            ClientExtension::SignatureAlgorithms(
-                                self.config
-                                    .verifier
-                                    .supported_verify_schemes(),
-                            ),
-                            ClientExtension::ExtendedMasterSecretRequest,
-                            ClientExtension::CertificateStatusRequest(
-                                CertificateStatusRequest::build_ocsp(),
-                            ),
-                        ],
-                    }),
-                };
-
-                let msg = Message {
-                    version: ProtocolVersion::TLSv1_0,
-                    payload: MessagePayload::handshake(payload),
-                };
-                log_msg(&msg, false);
-
-                let mut transcript_buffer = HandshakeHashBuffer::new();
-                transcript_buffer.add_message(&msg);
-                let next_state = CommonState::Send(SendState::ClientHello {
-                    transcript_buffer,
-                    random,
-                });
-
-                (msg.into(), next_state)
-            }
+    fn generate_message(&mut self, write_state: WriteState) -> GeneratedMessage {
+        match write_state {
+            WriteState::ClientHello(state) => state.generate_message(self),
             WriteState::ClientKeyExchange {
                 suite,
                 kx,
@@ -432,7 +388,7 @@ impl LlConnectionCommon {
                     transcript,
                 };
 
-                (msg.into(), next_state)
+                GeneratedMessage::new(msg, next_state)
             }
             WriteState::ChangeCipherSpec {
                 secrets,
@@ -449,7 +405,7 @@ impl LlConnectionCommon {
                     transcript,
                 });
 
-                (msg.into(), next_state)
+                GeneratedMessage::new(msg, next_state)
             }
             WriteState::Finished {
                 mut transcript,
@@ -469,36 +425,33 @@ impl LlConnectionCommon {
                 log_msg(&msg, false);
 
                 transcript.add_message(&msg);
-                needs_encryption = true;
 
-                (
-                    msg.into(),
-                    CommonState::Send(SendState::Finished { transcript }),
-                )
+                GeneratedMessage::new(msg, CommonState::Send(SendState::Finished { transcript }))
+                    .require_encryption(true)
             }
-            WriteState::Alert { description, error } => (
-                Message::build_alert(AlertLevel::Fatal, description).into(),
+            WriteState::Alert { description, error } => GeneratedMessage::new(
+                Message::build_alert(AlertLevel::Fatal, description),
                 CommonState::Send(SendState::Alert(error)),
             ),
             WriteState::Retry {
                 plain_msg,
                 index,
-                needs_encryption: needs_encryption_aux,
+                needs_encryption,
                 next_state,
-            } => {
-                skip_index = index;
-                needs_encryption = needs_encryption_aux;
-
-                (plain_msg, *next_state)
-            }
-        };
-
-        (msg, needs_encryption, skip_index, next_state)
+            } => GeneratedMessage::new(plain_msg, *next_state)
+                .skip(index)
+                .require_encryption(needs_encryption),
+        }
     }
 
     fn encrypt_tls_data(&mut self, outgoing_tls: &mut [u8]) -> Result<usize, EncryptError> {
         let message_fragmenter = MessageFragmenter::default();
-        let (plain_msg, needs_encryption, skip_index, next_state) = match self.state.take() {
+        let GeneratedMessage {
+            plain_msg,
+            needs_encryption,
+            skip_index,
+            next_state,
+        } = match self.state.take() {
             CommonState::Write(write_state) => self.generate_message(write_state),
             _ => unreachable!(),
         };
@@ -1060,4 +1013,3 @@ impl<'c> TrafficTransit<'c> {
             .encrypt_traffic_transit(application_data, outgoing_tls)
     }
 }
-
