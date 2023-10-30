@@ -10,7 +10,7 @@ use crate::check::inappropriate_message;
 use crate::client::low_level::{
     ExpectCertificate, ExpectServerHello, ExpectServerHelloDone, ExpectServerKeyExchange,
     SendChangeCipherSpec, SendClientHello, SendClientKeyExchange, SetupClientEncryption,
-    WriteChangeCipherSpec, WriteClientHello, WriteClientKeyExchange,
+    WriteChangeCipherSpec, WriteClientHello, WriteClientKeyExchange, WriteFinished,
 };
 use crate::crypto::cipher::{OpaqueMessage, PlainMessage};
 use crate::hash_hs::HandshakeHash;
@@ -19,7 +19,6 @@ use crate::msgs::base::Payload;
 use crate::msgs::codec::Reader;
 use crate::msgs::enums::AlertLevel;
 use crate::msgs::message::MessageError;
-use crate::tls12::ConnectionSecrets;
 use crate::{
     msgs::{
         fragmenter::MessageFragmenter,
@@ -82,10 +81,7 @@ pub(crate) enum WriteState {
     ClientHello(WriteClientHello),
     ClientKeyExchange(WriteClientKeyExchange),
     ChangeCipherSpec(WriteChangeCipherSpec),
-    Finished {
-        secrets: ConnectionSecrets,
-        transcript: HandshakeHash,
-    },
+    Finished(WriteFinished),
     Alert {
         description: AlertDescription,
         error: Error,
@@ -282,29 +278,7 @@ impl LlConnectionCommon {
             WriteState::ClientHello(state) => state.generate_message(self),
             WriteState::ClientKeyExchange(state) => state.generate_message(self),
             WriteState::ChangeCipherSpec(state) => state.generate_message(self),
-
-            WriteState::Finished {
-                mut transcript,
-                secrets,
-            } => {
-                let vh = transcript.get_current_hash();
-                let verify_data = secrets.client_verify_data(&vh);
-                let verify_data_payload = Payload::new(verify_data);
-
-                let msg = Message {
-                    version: ProtocolVersion::TLSv1_2,
-                    payload: MessagePayload::handshake(HandshakeMessagePayload {
-                        typ: HandshakeType::Finished,
-                        payload: HandshakePayload::Finished(verify_data_payload),
-                    }),
-                };
-                log_msg(&msg, false);
-
-                transcript.add_message(&msg);
-
-                GeneratedMessage::new(msg, CommonState::Send(SendState::Finished { transcript }))
-                    .require_encryption(true)
-            }
+            WriteState::Finished(state) => state.generate_message(self), 
             WriteState::Alert { description, error } => GeneratedMessage::new(
                 Message::build_alert(AlertLevel::Fatal, description),
                 CommonState::Send(SendState::Alert(error)),

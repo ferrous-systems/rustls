@@ -494,9 +494,40 @@ pub(crate) struct SendChangeCipherSpec {
 
 impl SendChangeCipherSpec {
     pub(crate) fn tls_data_done(self) -> CommonState {
-        CommonState::Write(WriteState::Finished {
+        CommonState::Write(WriteState::Finished(WriteFinished {
             secrets: self.secrets,
             transcript: self.transcript,
-        })
+        }))
+    }
+}
+
+pub(crate) struct WriteFinished {
+    secrets: ConnectionSecrets,
+    transcript: HandshakeHash,
+}
+impl WriteFinished {
+    pub(crate) fn generate_message(mut self, _common: &mut LlConnectionCommon) -> GeneratedMessage {
+        let vh = self.transcript.get_current_hash();
+        let verify_data = self.secrets.client_verify_data(&vh);
+        let verify_data_payload = Payload::new(verify_data);
+
+        let msg = Message {
+            version: ProtocolVersion::TLSv1_2,
+            payload: MessagePayload::handshake(HandshakeMessagePayload {
+                typ: HandshakeType::Finished,
+                payload: HandshakePayload::Finished(verify_data_payload),
+            }),
+        };
+        log_msg(&msg, false);
+
+        self.transcript.add_message(&msg);
+
+        GeneratedMessage::new(
+            msg,
+            CommonState::Send(SendState::Finished {
+                transcript: self.transcript,
+            }),
+        )
+        .require_encryption(true)
     }
 }
