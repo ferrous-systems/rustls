@@ -126,7 +126,7 @@ impl WriteClientHello {
 
         let mut transcript_buffer = HandshakeHashBuffer::new();
         transcript_buffer.add_message(&msg);
-        let next_state = CommonState::Send(SendState::ClientHello(SendClientHello {
+        let next_state = CommonState::Send(Box::new(SendClientHello {
             transcript_buffer,
             random: self.random,
         }));
@@ -140,8 +140,8 @@ pub(crate) struct SendClientHello {
     random: Random,
 }
 
-impl SendClientHello {
-    pub(crate) fn tls_data_done(self) -> CommonState {
+impl SendState for SendClientHello {
+    fn tls_data_done(self: Box<Self>) -> CommonState {
         CommonState::Expect(Box::new(ExpectServerHello {
             transcript_buffer: self.transcript_buffer,
             random: self.random,
@@ -432,12 +432,10 @@ impl SetupClientEncryption {
                 .prepare_message_decrypter(dec);
             common.record_layer.start_encrypting();
 
-            Ok(CommonState::Send(SendState::ClientKeyExchange(
-                SendClientKeyExchange {
-                    secrets,
-                    transcript: self.transcript,
-                },
-            )))
+            Ok(CommonState::Send(Box::new(SendClientKeyExchange {
+                secrets,
+                transcript: self.transcript,
+            })))
         }
     }
 }
@@ -447,8 +445,8 @@ pub(crate) struct SendClientKeyExchange {
     transcript: HandshakeHash,
 }
 
-impl SendClientKeyExchange {
-    pub(crate) fn tls_data_done(self) -> CommonState {
+impl SendState for SendClientKeyExchange {
+    fn tls_data_done(self: Box<Self>) -> CommonState {
         CommonState::Write(WriteState::ChangeCipherSpec(WriteChangeCipherSpec {
             secrets: self.secrets,
             transcript: self.transcript,
@@ -468,7 +466,7 @@ impl WriteChangeCipherSpec {
         };
         log_msg(&msg, false);
 
-        let next_state = CommonState::Send(SendState::ChangeCipherSpec(SendChangeCipherSpec {
+        let next_state = CommonState::Send(Box::new(SendChangeCipherSpec {
             secrets: self.secrets,
             transcript: self.transcript,
         }));
@@ -482,8 +480,8 @@ pub(crate) struct SendChangeCipherSpec {
     transcript: HandshakeHash,
 }
 
-impl SendChangeCipherSpec {
-    pub(crate) fn tls_data_done(self) -> CommonState {
+impl SendState for SendChangeCipherSpec {
+    fn tls_data_done(self: Box<Self>) -> CommonState {
         CommonState::Write(WriteState::Finished(WriteFinished {
             secrets: self.secrets,
             transcript: self.transcript,
@@ -514,7 +512,7 @@ impl WriteFinished {
 
         GeneratedMessage::new(
             msg,
-            CommonState::Send(SendState::Finished(SendFinished {
+            CommonState::Send(Box::new(SendFinished {
                 transcript: self.transcript,
             })),
         )
@@ -526,8 +524,8 @@ pub(crate) struct SendFinished {
     transcript: HandshakeHash,
 }
 
-impl SendFinished {
-    pub(crate) fn tls_data_done(self) -> CommonState {
+impl SendState for SendFinished {
+    fn tls_data_done(self: Box<Self>) -> CommonState {
         CommonState::Expect(Box::new(ExpectChangeCipherSpec {
             transcript: self.transcript,
         }))

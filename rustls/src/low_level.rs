@@ -7,7 +7,6 @@ use alloc::boxed::Box;
 use std::sync::Arc;
 
 use crate::client::low_level::{
-    SendChangeCipherSpec, SendClientHello, SendClientKeyExchange, SendFinished,
     SetupClientEncryption, WriteChangeCipherSpec, WriteClientHello, WriteClientKeyExchange,
     WriteFinished,
 };
@@ -96,20 +95,16 @@ pub(crate) enum WriteState {
     },
 }
 
-pub(crate) enum SendState {
-    ClientHello(SendClientHello),
-    ClientKeyExchange(SendClientKeyExchange),
-    ChangeCipherSpec(SendChangeCipherSpec),
-    Finished(SendFinished),
-    Alert(SendAlert),
+pub(crate) trait SendState {
+    fn tls_data_done(self: Box<Self>) -> CommonState;
 }
 
 pub(crate) struct SendAlert {
     error: Error,
 }
 
-impl SendAlert {
-    fn tls_data_done(self) -> CommonState {
+impl SendState for SendAlert {
+    fn tls_data_done(self: Box<Self>) -> CommonState {
         CommonState::Poisoned(self.error)
     }
 }
@@ -122,7 +117,7 @@ pub(crate) enum CommonState {
     },
     Expect(Box<dyn ExpectState>),
     Write(WriteState),
-    Send(SendState),
+    Send(Box<dyn SendState>),
     SetupClientEncryption(SetupClientEncryption),
     HandshakeDone,
     Poisoned(Error),
@@ -284,7 +279,7 @@ impl LlConnectionCommon {
             WriteState::Finished(state) => state.generate_message(self),
             WriteState::Alert { description, error } => GeneratedMessage::new(
                 Message::build_alert(AlertLevel::Fatal, description),
-                CommonState::Send(SendState::Alert(SendAlert { error })),
+                CommonState::Send(Box::new(SendAlert { error })),
             ),
             WriteState::Retry {
                 plain_msg,
@@ -349,16 +344,6 @@ impl LlConnectionCommon {
         self.state = next_state;
 
         Ok(written_bytes)
-    }
-
-    fn tls_data_done(&mut self, curr_state: SendState) {
-        self.state = match curr_state {
-            SendState::ClientHello(state) => state.tls_data_done(),
-            SendState::ClientKeyExchange(state) => state.tls_data_done(),
-            SendState::ChangeCipherSpec(state) => state.tls_data_done(),
-            SendState::Finished(state) => state.tls_data_done(),
-            SendState::Alert(state) => state.tls_data_done(),
-        };
     }
 
     fn encrypt_traffic_transit(
@@ -618,13 +603,13 @@ pub struct MustTransmitTlsData<'c> {
     /// FIXME: docs
     conn: &'c mut LlConnectionCommon,
     /// FIXME: docs
-    curr_state: SendState,
+    curr_state: Box<dyn SendState>,
 }
 
 impl<'c> MustTransmitTlsData<'c> {
     /// FIXME: docs
     pub fn done(self) {
-        self.conn.tls_data_done(self.curr_state)
+        self.conn.state = self.curr_state.tls_data_done();
     }
 }
 
