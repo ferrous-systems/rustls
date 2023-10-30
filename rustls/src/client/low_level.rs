@@ -441,10 +441,26 @@ impl SetupClientEncryption {
                 .prepare_message_decrypter(dec);
             common.record_layer.start_encrypting();
 
-            Ok(CommonState::Send(SendState::ClientKeyExchange {
-                secrets,
-                transcript: self.transcript,
-            }))
+            Ok(CommonState::Send(SendState::ClientKeyExchange(
+                SendClientKeyExchange {
+                    secrets,
+                    transcript: self.transcript,
+                },
+            )))
         }
+    }
+}
+
+pub(crate) struct SendClientKeyExchange {
+    secrets: ConnectionSecrets,
+    transcript: HandshakeHash,
+}
+
+impl SendClientKeyExchange {
+    pub(crate) fn tls_data_done(self) -> CommonState {
+        CommonState::Write(WriteState::ChangeCipherSpec {
+            secrets: self.secrets,
+            transcript: self.transcript,
+        })
     }
 }

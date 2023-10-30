@@ -9,7 +9,7 @@ use std::sync::Arc;
 use crate::check::inappropriate_message;
 use crate::client::low_level::{
     ExpectCertificate, ExpectServerHello, ExpectServerHelloDone, ExpectServerKeyExchange,
-    SendClientHello, SetupClientEncryption, WriteClientHello, WriteClientKeyExchange,
+    SendClientHello, SetupClientEncryption, WriteClientHello, WriteClientKeyExchange, SendClientKeyExchange,
 };
 use crate::crypto::cipher::{OpaqueMessage, PlainMessage};
 use crate::hash_hs::HandshakeHash;
@@ -103,10 +103,7 @@ pub(crate) enum WriteState {
 
 pub(crate) enum SendState {
     ClientHello(SendClientHello),
-    ClientKeyExchange {
-        secrets: ConnectionSecrets,
-        transcript: HandshakeHash,
-    },
+    ClientKeyExchange(SendClientKeyExchange),
     ChangeCipherSpec {
         secrets: ConnectionSecrets,
         transcript: HandshakeHash,
@@ -403,13 +400,7 @@ impl LlConnectionCommon {
     fn tls_data_done(&mut self, curr_state: SendState) {
         self.state = match curr_state {
             SendState::ClientHello(state) => state.tls_data_done(),
-            SendState::ClientKeyExchange {
-                secrets,
-                transcript,
-            } => CommonState::Write(WriteState::ChangeCipherSpec {
-                secrets,
-                transcript,
-            }),
+            SendState::ClientKeyExchange(state) => state.tls_data_done(),
             SendState::ChangeCipherSpec {
                 secrets,
                 transcript,
