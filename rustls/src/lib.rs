@@ -443,6 +443,7 @@ pub mod client {
     #[cfg(feature = "tls12")]
     pub(crate) mod tls12;
     mod tls13;
+    pub mod low_level;
 
     pub use crate::dns_name::InvalidDnsNameError;
     pub use builder::WantsClientCert;

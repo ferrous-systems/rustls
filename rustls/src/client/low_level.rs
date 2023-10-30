@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use crate::{ClientConfig, Error, ServerName};
 
-use super::common::LlConnectionCommon;
+use crate::low_level::LlConnectionCommon;
 
 /// FIXME: docs
 pub struct LlClientConnection {
