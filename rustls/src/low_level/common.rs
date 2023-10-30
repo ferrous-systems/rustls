@@ -148,6 +148,7 @@ enum CommonState {
     },
     HandshakeDone,
     Poisoned(Error),
+    ConnectionClosed,
 }
 
 impl CommonState {
@@ -187,6 +188,12 @@ impl LlConnectionCommon {
         loop {
             match self.state.take() {
                 CommonState::Unreachable => unreachable!(),
+                CommonState::ConnectionClosed => {
+                    return Ok(Status {
+                        discard: core::mem::take(&mut self.offset),
+                        state: State::ConnectionClosed,
+                    });
+                }
                 CommonState::Poisoned(err) => {
                     return Err(err);
                 }
@@ -829,7 +836,7 @@ impl LlConnectionCommon {
                 error: Error::AlertReceived(alert.description),
             })
         } else if alert.description == AlertDescription::CloseNotify {
-            curr_state
+            CommonState::ConnectionClosed
         } else if alert.level == AlertLevel::Warning {
             std::println!("TLS alert warning received: {:#?}", alert);
             curr_state
@@ -873,6 +880,9 @@ pub enum State<'c, 'i> {
 
     /// Handshake is complete.
     TrafficTransit(TrafficTransit<'c>),
+
+    /// Connection is being closed.
+    ConnectionClosed,
     // .. other variants are omitted for now ..
 }
 

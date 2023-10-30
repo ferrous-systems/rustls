@@ -84,8 +84,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let AppDataRecord { payload, .. } = result?;
 
                     assert_eq!(payload, b"HTTP/1.0 200 OK\r\nConnection: close\r\n\r\nHello world from rustls tlsserver\r\n");
-
-                    return Ok(());
                 }
             }
 
@@ -97,6 +95,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 let read = sock.read(&mut incoming_tls[incoming_used..])?;
                 incoming_used += read;
+            }
+
+            State::ConnectionClosed => {
+                return Ok(());
             }
         }
 
