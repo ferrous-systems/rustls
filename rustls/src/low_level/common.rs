@@ -238,7 +238,7 @@ impl LlConnectionCommon {
                     };
 
                     if let MessagePayload::Alert(alert) = message.payload {
-                        self.handle_alert(alert, expect_state)?;
+                        self.handle_alert(alert, CommonState::Expect(expect_state))?;
                     } else {
                         self.state = CommonState::Process {
                             message,
@@ -807,7 +807,7 @@ impl LlConnectionCommon {
     fn handle_alert(
         &mut self,
         alert: crate::msgs::alert::AlertMessagePayload,
-        curr_state: ExpectState,
+        curr_state: CommonState,
     ) -> Result<(), Error> {
         self.state = if let AlertLevel::Unknown(_) = alert.level {
             CommonState::Write(WriteState::Alert {
@@ -815,10 +815,10 @@ impl LlConnectionCommon {
                 error: Error::AlertReceived(alert.description),
             })
         } else if alert.description == AlertDescription::CloseNotify {
-            CommonState::Expect(curr_state)
+            curr_state
         } else if alert.level == AlertLevel::Warning {
             std::println!("TLS alert warning received: {:#?}", alert);
-            CommonState::Expect(curr_state)
+            curr_state
         } else {
             return Err(Error::AlertReceived(alert.description));
         };
