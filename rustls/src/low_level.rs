@@ -101,7 +101,17 @@ pub(crate) enum SendState {
     ClientKeyExchange(SendClientKeyExchange),
     ChangeCipherSpec(SendChangeCipherSpec),
     Finished(SendFinished),
-    Alert(Error),
+    Alert(SendAlert),
+}
+
+pub(crate) struct SendAlert {
+    error: Error,
+}
+
+impl SendAlert {
+    fn tls_data_done(self) -> CommonState {
+        CommonState::Poisoned(self.error)
+    }
 }
 
 pub(crate) enum CommonState {
@@ -274,7 +284,7 @@ impl LlConnectionCommon {
             WriteState::Finished(state) => state.generate_message(self),
             WriteState::Alert { description, error } => GeneratedMessage::new(
                 Message::build_alert(AlertLevel::Fatal, description),
-                CommonState::Send(SendState::Alert(error)),
+                CommonState::Send(SendState::Alert(SendAlert { error })),
             ),
             WriteState::Retry {
                 plain_msg,
@@ -347,7 +357,7 @@ impl LlConnectionCommon {
             SendState::ClientKeyExchange(state) => state.tls_data_done(),
             SendState::ChangeCipherSpec(state) => state.tls_data_done(),
             SendState::Finished(state) => state.tls_data_done(),
-            SendState::Alert(error) => CommonState::Poisoned(error),
+            SendState::Alert(state) => state.tls_data_done(),
         };
     }
 
