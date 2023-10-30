@@ -222,7 +222,21 @@ impl LlConnectionCommon {
                     message,
                     expect_state,
                 } => {
-                    self.state = self.process_message(expect_state, message)?;
+                    self.state = match expect_state {
+                        ExpectState::ServerHello(state) => state.process_message(self, message)?,
+
+                        ExpectState::Certificate(state) => state.process_message(self, message)?,
+                        ExpectState::ServerKeyExchange(state) => {
+                            state.process_message(self, message)?
+                        }
+                        ExpectState::ServerHelloDone(state) => {
+                            state.process_message(self, message)?
+                        }
+                        ExpectState::ChangeCipherSpec(state) => {
+                            state.process_message(self, message)?
+                        }
+                        ExpectState::Finished(state) => state.process_message(self, message)?,
+                    };
                 }
                 CommonState::SetupClientEncryption(state) => {
                     self.state = state.setup_encryption(self)?;
@@ -407,24 +421,6 @@ impl LlConnectionCommon {
         log_msg(&msg, true);
 
         Ok(msg)
-    }
-
-    fn process_message(
-        &mut self,
-        expect_state: ExpectState,
-        msg: Message,
-    ) -> Result<CommonState, Error> {
-        let state = match expect_state {
-            ExpectState::ServerHello(state) => state.process_message(self, msg)?,
-
-            ExpectState::Certificate(state) => state.process_message(self, msg)?,
-            ExpectState::ServerKeyExchange(state) => state.process_message(self, msg)?,
-            ExpectState::ServerHelloDone(state) => state.process_message(self, msg)?,
-            ExpectState::ChangeCipherSpec(state) => state.process_message(self, msg)?,
-            ExpectState::Finished(state) => state.process_message(self, msg)?,
-        };
-
-        Ok(state)
     }
 
     fn handle_alert(
