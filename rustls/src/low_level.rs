@@ -135,7 +135,7 @@ pub(crate) enum CommonState {
     Unreachable,
     Process {
         message: Message,
-        expect_state: Box<dyn ExpectState>,
+        curr_state: Box<dyn ExpectState>,
     },
     Expect(Box<dyn ExpectState>),
     Write(Box<dyn WriteState>),
@@ -213,12 +213,12 @@ impl LlConnectionCommon {
                         state: State::NeedsMoreTlsData { num_bytes: None },
                     });
                 }
-                CommonState::Expect(mut expect_state) => {
-                    let transcript = expect_state.get_transcript_mut();
+                CommonState::Expect(mut curr_state) => {
+                    let transcript = curr_state.get_transcript_mut();
                     let message = match self.read_message(incoming_tls, transcript) {
                         Ok(message) => message,
                         Err(Error::InvalidMessage(InvalidMessage::MessageTooShort)) => {
-                            self.state = CommonState::Expect(expect_state);
+                            self.state = CommonState::Expect(curr_state);
 
                             return Ok(Status {
                                 discard: core::mem::take(&mut self.offset),
@@ -229,19 +229,19 @@ impl LlConnectionCommon {
                     };
 
                     if let MessagePayload::Alert(alert) = message.payload {
-                        self.handle_alert(alert, CommonState::Expect(expect_state))?;
+                        self.handle_alert(alert, CommonState::Expect(curr_state))?;
                     } else {
                         self.state = CommonState::Process {
                             message,
-                            expect_state,
+                            curr_state,
                         }
                     };
                 }
                 CommonState::Process {
                     message,
-                    expect_state,
+                    curr_state,
                 } => {
-                    self.state = expect_state.process_message(self, message)?;
+                    self.state = curr_state.process_message(self, message)?;
                 }
                 CommonState::SetupClientEncryption(state) => {
                     self.state = state.setup_encryption(self)?;
