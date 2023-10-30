@@ -6,7 +6,9 @@ use core::ops::{Deref, DerefMut};
 use std::sync::Arc;
 
 use crate::hash_hs::HandshakeHashBuffer;
-use crate::low_level::{log_msg, CommonState, GeneratedMessage, LlConnectionCommon, SendState};
+use crate::low_level::{
+    log_msg, CommonState, ExpectState, GeneratedMessage, LlConnectionCommon, SendState,
+};
 use crate::msgs::enums::{Compression, ECPointFormat};
 use crate::msgs::handshake::{
     CertificateStatusRequest, ClientExtension, ClientHelloPayload, HandshakeMessagePayload,
@@ -110,11 +112,25 @@ impl WriteClientHello {
 
         let mut transcript_buffer = HandshakeHashBuffer::new();
         transcript_buffer.add_message(&msg);
-        let next_state = CommonState::Send(SendState::ClientHello {
+        let next_state = CommonState::Send(SendState::ClientHello(SendClientHello {
             transcript_buffer,
             random: self.random,
-        });
+        }));
 
         GeneratedMessage::new(msg, next_state)
+    }
+}
+
+pub(crate) struct SendClientHello {
+    transcript_buffer: HandshakeHashBuffer,
+    random: Random,
+}
+
+impl SendClientHello {
+    pub(crate) fn tls_data_done(self) -> CommonState {
+        CommonState::Expect(ExpectState::ServerHello {
+            transcript_buffer: self.transcript_buffer,
+            random: self.random,
+        })
     }
 }

@@ -9,7 +9,7 @@ use pki_types::UnixTime;
 use std::sync::Arc;
 
 use crate::check::{inappropriate_handshake_message, inappropriate_message};
-use crate::client::low_level::WriteClientHello;
+use crate::client::low_level::{WriteClientHello, SendClientHello};
 use crate::client::tls12::ServerKxDetails;
 use crate::conn::ConnectionRandoms;
 use crate::crypto::cipher::{OpaqueMessage, PlainMessage};
@@ -134,10 +134,7 @@ pub(crate) enum WriteState {
 }
 
 pub(crate) enum SendState {
-    ClientHello {
-        transcript_buffer: HandshakeHashBuffer,
-        random: Random,
-    },
+    ClientHello(SendClientHello),
     ClientKeyExchange {
         secrets: ConnectionSecrets,
         transcript: HandshakeHash,
@@ -500,13 +497,7 @@ impl LlConnectionCommon {
 
     fn tls_data_done(&mut self, curr_state: SendState) {
         self.state = match curr_state {
-            SendState::ClientHello {
-                transcript_buffer,
-                random,
-            } => CommonState::Expect(ExpectState::ServerHello {
-                transcript_buffer,
-                random,
-            }),
+            SendState::ClientHello(state) => state.tls_data_done(),
             SendState::ClientKeyExchange {
                 secrets,
                 transcript,
