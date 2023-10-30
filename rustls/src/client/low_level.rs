@@ -3,10 +3,11 @@
 use alloc::vec;
 use alloc::vec::Vec;
 use core::ops::{Deref, DerefMut};
+use pki_types::UnixTime;
 use std::sync::Arc;
 
 use crate::conn::ConnectionRandoms;
-use crate::hash_hs::HandshakeHashBuffer;
+use crate::hash_hs::{HandshakeHash, HandshakeHashBuffer};
 use crate::low_level::{
     log_msg, CommonState, ExpectState, GeneratedMessage, LlConnectionCommon, SendState, WriteState,
 };
@@ -18,7 +19,7 @@ use crate::msgs::handshake::{
 use crate::msgs::message::{Message, MessagePayload};
 use crate::{
     AlertDescription, ClientConfig, Error, HandshakeType, PeerMisbehaved, ProtocolVersion,
-    ServerName, SupportedCipherSuite,
+    ServerName, SupportedCipherSuite, Tls12CipherSuite,
 };
 
 /// FIXME: docs
@@ -170,16 +171,63 @@ impl ExpectServerHello {
                 SupportedCipherSuite::Tls13(_) => todo!(),
             };
 
-            Ok(CommonState::Expect(ExpectState::Certificate {
-                suite,
-                randoms: ConnectionRandoms::new(self.random, payload.random),
-                transcript,
-            }))
+            Ok(CommonState::Expect(ExpectState::Certificate(
+                ExpectCertificate {
+                    suite,
+                    randoms: ConnectionRandoms::new(self.random, payload.random),
+                    transcript,
+                },
+            )))
         } else {
             Ok(CommonState::Write(WriteState::Alert {
                 description: AlertDescription::HandshakeFailure,
                 error: PeerMisbehaved::SelectedUnofferedCipherSuite.into(),
             }))
         }
+    }
+}
+
+pub(crate) struct ExpectCertificate {
+    suite: &'static Tls12CipherSuite,
+    randoms: ConnectionRandoms,
+    transcript: HandshakeHash,
+}
+
+impl ExpectCertificate {
+    pub(crate) fn process_message(
+        self,
+        common: &mut LlConnectionCommon,
+        msg: Message,
+    ) -> Result<CommonState, Error> {
+        let payload = require_handshake_msg_move!(
+            msg,
+            HandshakeType::Certificate,
+            HandshakePayload::Certificate
+        )?;
+
+        if let Err(error) = common
+            .config
+            .verifier
+            .verify_server_cert(&payload[0], &[], &common.name, &[], UnixTime::now())
+        {
+            Ok(CommonState::Write(WriteState::Alert {
+                description: match &error {
+                    Error::InvalidCertificate(e) => e.clone().into(),
+                    Error::PeerMisbehaved(_) => AlertDescription::IllegalParameter,
+                    _ => AlertDescription::HandshakeFailure,
+                },
+                error,
+            }))
+        } else {
+            Ok(CommonState::Expect(ExpectState::ServerKeyExchange {
+                suite: self.suite,
+                randoms: self.randoms,
+                transcript: self.transcript,
+            }))
+        }
+    }
+
+    pub(crate) fn get_transcript_mut(&mut self) -> Option<&mut HandshakeHash> {
+        Some(&mut self.transcript)
     }
 }
