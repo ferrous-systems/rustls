@@ -887,27 +887,50 @@ impl<'c, 'i> AppDataAvailable<'c, 'i> {
         let offset = self.conn.offset;
         let incoming_tls = self.incoming_tls.as_deref_mut()?;
 
-        match self
-            .conn
-            .read_message(incoming_tls, None)
-        {
-            Ok(msg) => match msg.payload {
-                MessagePayload::ApplicationData(Payload(payload)) => {
-                    let slice = &mut incoming_tls[offset..offset + payload.len()];
-                    slice.copy_from_slice(&payload);
+        let msg = Ok(()).and_then(|()| {
+            let mut reader = Reader::init(&incoming_tls[self.conn.offset..]);
+            let m = OpaqueMessage::read(&mut reader).map_err(|err| match err {
+                MessageError::TooShortForHeader | MessageError::TooShortForLength => {
+                    InvalidMessage::MessageTooShort
+                }
+                MessageError::InvalidEmptyPayload => InvalidMessage::InvalidEmptyPayload,
+                MessageError::MessageTooLarge => InvalidMessage::MessageTooLarge,
+                MessageError::InvalidContentType => InvalidMessage::InvalidContentType,
+                MessageError::UnknownProtocolVersion => InvalidMessage::UnknownProtocolVersion,
+            })?;
+            if let ContentType::ApplicationData = m.typ {
+                self.conn.offset += reader.used();
 
-                    Some(Ok(AppDataRecord {
-                        discard: self.conn.offset.try_into().unwrap(),
-                        payload: slice,
-                    }))
-                }
-                _ => {
-                    self.conn.offset = offset;
-                    None
-                }
-            },
-            Err(err) => Some(Err(err)),
-        }
+                let decrypted = self
+                    .conn
+                    .record_layer
+                    .decrypt_incoming(m)?
+                    .expect("we don't support early data yet");
+
+                let msg = decrypted.plaintext.try_into()?;
+                log_msg(&msg, true);
+
+                let Message {
+                    payload: MessagePayload::ApplicationData(Payload(payload)),
+                    ..
+                } = msg
+                else {
+                    unreachable!()
+                };
+
+                let slice = &mut incoming_tls[offset..offset + payload.len()];
+                slice.copy_from_slice(&payload);
+
+                Ok(Some(AppDataRecord {
+                    discard: self.conn.offset.try_into().unwrap(),
+                    payload: slice,
+                }))
+            } else {
+                Ok(None)
+            }
+        });
+
+        msg.transpose()
     }
 }
 
