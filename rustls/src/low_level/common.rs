@@ -230,22 +230,10 @@ impl LlConnectionCommon {
                         Err(err) => return Err(err),
                     };
 
-                    self.state = if let MessagePayload::Alert(alert) = message.payload {
-                        if let AlertLevel::Unknown(_) = alert.level {
-                            CommonState::Write(WriteState::Alert {
-                                description: AlertDescription::IllegalParameter,
-                                error: Error::AlertReceived(alert.description),
-                            })
-                        } else if alert.description == AlertDescription::CloseNotify {
-                            CommonState::Expect(expect_state)
-                        } else if alert.level == AlertLevel::Warning {
-                            std::println!("TLS alert warning received: {:#?}", alert);
-                            CommonState::Expect(expect_state)
-                        } else {
-                            return Err(Error::AlertReceived(alert.description));
-                        }
+                    if let MessagePayload::Alert(alert) = message.payload {
+                        self.handle_alert(alert, expect_state)?;
                     } else {
-                        CommonState::Process {
+                        self.state = CommonState::Process {
                             message,
                             expect_state,
                         }
@@ -803,6 +791,28 @@ impl LlConnectionCommon {
         };
 
         Ok(state)
+    }
+
+    fn handle_alert(
+        &mut self,
+        alert: crate::msgs::alert::AlertMessagePayload,
+        curr_state: ExpectState,
+    ) -> Result<(), Error> {
+        self.state = if let AlertLevel::Unknown(_) = alert.level {
+            CommonState::Write(WriteState::Alert {
+                description: AlertDescription::IllegalParameter,
+                error: Error::AlertReceived(alert.description),
+            })
+        } else if alert.description == AlertDescription::CloseNotify {
+            CommonState::Expect(curr_state)
+        } else if alert.level == AlertLevel::Warning {
+            std::println!("TLS alert warning received: {:#?}", alert);
+            CommonState::Expect(curr_state)
+        } else {
+            return Err(Error::AlertReceived(alert.description));
+        };
+
+        Ok(())
     }
 }
 
