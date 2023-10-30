@@ -281,12 +281,12 @@ impl LlConnectionCommon {
                     });
                 }
                 state @ CommonState::HandshakeDone => {
-                    self.state = state;
-
                     let mut reader = Reader::init(&incoming_tls[self.offset..]);
                     match OpaqueMessage::read(&mut reader) {
                         Ok(msg) => match msg.typ {
                             ContentType::ApplicationData => {
+                                self.state = state;
+
                                 return Ok(Status {
                                     discard: core::mem::take(&mut self.offset),
                                     state: State::AppDataAvailable(AppDataAvailable {
@@ -295,11 +295,25 @@ impl LlConnectionCommon {
                                     }),
                                 });
                             }
+                            ContentType::Alert => {
+                                let Message {
+                                    payload: MessagePayload::Alert(alert),
+                                    ..
+                                } = self.read_message(incoming_tls, None)?
+                                else {
+                                    unreachable!()
+                                };
+
+                                self.handle_alert(alert, CommonState::HandshakeDone)?;
+                            }
+
                             content_type => {
                                 panic!("{:?}", content_type);
                             }
                         },
                         Err(_) => {
+                            self.state = state;
+
                             return Ok(Status {
                                 discard: core::mem::take(&mut self.offset),
                                 state: State::TrafficTransit(TrafficTransit { conn: self }),
