@@ -7,12 +7,11 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 use std::sync::Arc;
 
-use crate::check::{inappropriate_handshake_message, inappropriate_message};
+use crate::check::inappropriate_message;
 use crate::client::low_level::{
-    ExpectCertificate, ExpectServerHello, ExpectServerKeyExchange, SendClientHello,
-    WriteClientHello,
+    ExpectCertificate, ExpectServerHello, ExpectServerHelloDone, ExpectServerKeyExchange,
+    SendClientHello, WriteClientHello,
 };
-use crate::client::tls12::ServerKxDetails;
 use crate::conn::ConnectionRandoms;
 use crate::crypto::cipher::{OpaqueMessage, PlainMessage};
 use crate::crypto::ActiveKeyExchange;
@@ -22,7 +21,7 @@ use crate::msgs::base::{Payload, PayloadU8};
 use crate::msgs::ccs::ChangeCipherSpecPayload;
 use crate::msgs::codec::{Codec, Reader};
 use crate::msgs::enums::AlertLevel;
-use crate::msgs::handshake::{ServerEcdhParams, ServerKeyExchangePayload};
+use crate::msgs::handshake::ServerEcdhParams;
 use crate::msgs::message::MessageError;
 use crate::tls12::ConnectionSecrets;
 use crate::{
@@ -33,10 +32,7 @@ use crate::{
     },
     ClientConfig, Error, HandshakeType, ProtocolVersion,
 };
-use crate::{
-    AlertDescription, ContentType, InvalidMessage, PeerMisbehaved, ServerName, Side,
-    Tls12CipherSuite,
-};
+use crate::{AlertDescription, ContentType, InvalidMessage, ServerName, Side, Tls12CipherSuite};
 
 pub(crate) fn log_msg(msg: &Message, read: bool) {
     let verb = if read { "Read" } else { "Write" };
@@ -81,18 +77,9 @@ pub(crate) enum ExpectState {
     ServerHello(ExpectServerHello),
     Certificate(ExpectCertificate),
     ServerKeyExchange(ExpectServerKeyExchange),
-    ServerHelloDone {
-        suite: &'static Tls12CipherSuite,
-        opaque_kx: ServerKeyExchangePayload,
-        randoms: ConnectionRandoms,
-        transcript: HandshakeHash,
-    },
-    ChangeCipherSpec {
-        transcript: HandshakeHash,
-    },
-    Finished {
-        transcript: HandshakeHash,
-    },
+    ServerHelloDone(ExpectServerHelloDone),
+    ChangeCipherSpec { transcript: HandshakeHash },
+    Finished { transcript: HandshakeHash },
 }
 
 pub(crate) enum WriteState {
@@ -233,12 +220,12 @@ impl LlConnectionCommon {
                 CommonState::Expect(mut expect_state) => {
                     let transcript = match &mut expect_state {
                         ExpectState::ChangeCipherSpec { .. } => None,
-                        ExpectState::ServerHelloDone { transcript, .. }
-                        | ExpectState::Finished { transcript } => Some(transcript),
+                        ExpectState::Finished { transcript } => Some(transcript),
                         ExpectState::ServerHello(state) => state.get_transcript_mut(),
                         ExpectState::Certificate(state) => state.get_transcript_mut(),
 
                         ExpectState::ServerKeyExchange(state) => state.get_transcript_mut(),
+                        ExpectState::ServerHelloDone(state) => state.get_transcript_mut(),
                     };
 
                     let message = match self.read_message(incoming_tls, transcript) {
@@ -572,86 +559,7 @@ impl LlConnectionCommon {
 
             ExpectState::Certificate(state) => state.process_message(self, msg)?,
             ExpectState::ServerKeyExchange(state) => state.process_message(self, msg)?,
-            ExpectState::ServerHelloDone {
-                suite,
-                randoms,
-                opaque_kx,
-                transcript,
-            } => {
-                match msg.payload {
-                    MessagePayload::Handshake {
-                        parsed:
-                            HandshakeMessagePayload {
-                                typ: HandshakeType::CertificateRequest,
-                                payload: HandshakePayload::CertificateRequest(_),
-                            },
-                        ..
-                    } => CommonState::Expect(ExpectState::ServerHelloDone {
-                        suite,
-                        randoms,
-                        opaque_kx,
-                        transcript,
-                    }),
-                    MessagePayload::Handshake {
-                        parsed:
-                            HandshakeMessagePayload {
-                                typ: HandshakeType::ServerHelloDone,
-                                payload: HandshakePayload::ServerHelloDone,
-                            },
-                        ..
-                    } => match opaque_kx.unwrap_given_kxa(suite.kx) {
-                        Some(ecdhe) => {
-                            let mut kx_params = Vec::new();
-                            ecdhe.params.encode(&mut kx_params);
-                            let server_kx = ServerKxDetails::new(kx_params, ecdhe.dss);
-
-                            let mut rd = Reader::init(&server_kx.kx_params);
-                            let ecdh_params = ServerEcdhParams::read(&mut rd)?;
-
-                            if rd.any_left() {
-                                CommonState::Write(WriteState::Alert {
-                                    description: AlertDescription::DecodeError,
-                                    error: InvalidMessage::InvalidDhParams.into(),
-                                })
-                            } else if let Some(skxg) = self
-                                .config
-                                .find_kx_group(ecdh_params.curve_params.named_group)
-                            {
-                                let kx = skxg
-                                    .start()
-                                    .map_err(|_| Error::FailedToGetRandomBytes)?;
-
-                                CommonState::Write(WriteState::ClientKeyExchange {
-                                    suite,
-                                    kx,
-                                    ecdh_params,
-                                    randoms,
-                                    transcript,
-                                })
-                            } else {
-                                CommonState::Write(WriteState::Alert {
-                                    description: AlertDescription::IllegalParameter,
-                                    error: PeerMisbehaved::IllegalHelloRetryRequestWithUnofferedNamedGroup.into(),
-                                })
-                            }
-                        }
-                        None => CommonState::Write(WriteState::Alert {
-                            description: AlertDescription::DecodeError,
-                            error: InvalidMessage::MissingKeyExchange.into(),
-                        }),
-                    },
-                    payload => {
-                        return Err(inappropriate_handshake_message(
-                            &payload,
-                            &[ContentType::Handshake],
-                            &[
-                                HandshakeType::ServerHelloDone,
-                                HandshakeType::CertificateRequest,
-                            ],
-                        ));
-                    }
-                }
-            }
+            ExpectState::ServerHelloDone(state) => state.process_message(self, msg)?,
             ExpectState::ChangeCipherSpec { transcript } => match msg.payload {
                 MessagePayload::ChangeCipherSpec(_) => {
                     self.record_layer.start_decrypting();

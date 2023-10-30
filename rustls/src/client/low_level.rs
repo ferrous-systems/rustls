@@ -6,21 +6,25 @@ use core::ops::{Deref, DerefMut};
 use pki_types::UnixTime;
 use std::sync::Arc;
 
+use crate::check::inappropriate_handshake_message;
 use crate::conn::ConnectionRandoms;
 use crate::hash_hs::{HandshakeHash, HandshakeHashBuffer};
 use crate::low_level::{
     log_msg, CommonState, ExpectState, GeneratedMessage, LlConnectionCommon, SendState, WriteState,
 };
+use crate::msgs::codec::{Codec, Reader};
 use crate::msgs::enums::{Compression, ECPointFormat};
 use crate::msgs::handshake::{
     CertificateStatusRequest, ClientExtension, ClientHelloPayload, HandshakeMessagePayload,
-    HandshakePayload, Random, SessionId,
+    HandshakePayload, Random, ServerEcdhParams, ServerKeyExchangePayload, SessionId,
 };
 use crate::msgs::message::{Message, MessagePayload};
 use crate::{
-    AlertDescription, ClientConfig, Error, HandshakeType, PeerMisbehaved, ProtocolVersion,
-    ServerName, SupportedCipherSuite, Tls12CipherSuite,
+    AlertDescription, ClientConfig, ContentType, Error, HandshakeType, InvalidMessage,
+    PeerMisbehaved, ProtocolVersion, ServerName, SupportedCipherSuite, Tls12CipherSuite,
 };
+
+use super::tls12::ServerKxDetails;
 
 /// FIXME: docs
 pub struct LlClientConnection {
@@ -255,12 +259,106 @@ impl ExpectServerKeyExchange {
             HandshakePayload::ServerKeyExchange
         )?;
 
-        Ok(CommonState::Expect(ExpectState::ServerHelloDone {
-            suite: self.suite,
-            randoms: self.randoms,
-            opaque_kx,
-            transcript: self.transcript,
-        }))
+        Ok(CommonState::Expect(ExpectState::ServerHelloDone(
+            ExpectServerHelloDone {
+                suite: self.suite,
+                randoms: self.randoms,
+                opaque_kx,
+                transcript: self.transcript,
+            },
+        )))
+    }
+
+    pub(crate) fn get_transcript_mut(&mut self) -> Option<&mut HandshakeHash> {
+        Some(&mut self.transcript)
+    }
+}
+
+pub(crate) struct ExpectServerHelloDone {
+    suite: &'static Tls12CipherSuite,
+    opaque_kx: ServerKeyExchangePayload,
+    randoms: ConnectionRandoms,
+    transcript: HandshakeHash,
+}
+
+impl ExpectServerHelloDone {
+    pub(crate) fn process_message(
+        self,
+        common: &mut LlConnectionCommon,
+        msg: Message,
+    ) -> Result<CommonState, Error> {
+        match msg.payload {
+            MessagePayload::Handshake {
+                parsed:
+                    HandshakeMessagePayload {
+                        typ: HandshakeType::CertificateRequest,
+                        payload: HandshakePayload::CertificateRequest(_),
+                    },
+                ..
+            } => Ok(CommonState::Expect(ExpectState::ServerHelloDone(self))),
+            MessagePayload::Handshake {
+                parsed:
+                    HandshakeMessagePayload {
+                        typ: HandshakeType::ServerHelloDone,
+                        payload: HandshakePayload::ServerHelloDone,
+                    },
+                ..
+            } => match self
+                .opaque_kx
+                .unwrap_given_kxa(self.suite.kx)
+            {
+                Some(ecdhe) => {
+                    let mut kx_params = Vec::new();
+                    ecdhe.params.encode(&mut kx_params);
+                    let server_kx = ServerKxDetails::new(kx_params, ecdhe.dss);
+
+                    let mut rd = Reader::init(&server_kx.kx_params);
+                    let ecdh_params = ServerEcdhParams::read(&mut rd)?;
+
+                    if rd.any_left() {
+                        Ok(CommonState::Write(WriteState::Alert {
+                            description: AlertDescription::DecodeError,
+                            error: InvalidMessage::InvalidDhParams.into(),
+                        }))
+                    } else if let Some(skxg) = common
+                        .config
+                        .find_kx_group(ecdh_params.curve_params.named_group)
+                    {
+                        let kx = skxg
+                            .start()
+                            .map_err(|_| Error::FailedToGetRandomBytes)?;
+
+                        Ok(CommonState::Write(WriteState::ClientKeyExchange {
+                            suite: self.suite,
+                            kx,
+                            ecdh_params,
+                            randoms: self.randoms,
+                            transcript: self.transcript,
+                        }))
+                    } else {
+                        Ok(CommonState::Write(WriteState::Alert {
+                            description: AlertDescription::IllegalParameter,
+                            error: PeerMisbehaved::IllegalHelloRetryRequestWithUnofferedNamedGroup
+                                .into(),
+                        }))
+                    }
+                }
+                None => Ok(CommonState::Write(WriteState::Alert {
+                    description: AlertDescription::DecodeError,
+                    error: InvalidMessage::MissingKeyExchange.into(),
+                })),
+            },
+            payload => {
+                return Err(inappropriate_handshake_message(
+                    &payload,
+                    &[ContentType::Handshake],
+                    &[
+                        HandshakeType::ServerHelloDone,
+                        HandshakeType::CertificateRequest,
+                    ],
+                ));
+            }
+        }
     }
 
     pub(crate) fn get_transcript_mut(&mut self) -> Option<&mut HandshakeHash> {
