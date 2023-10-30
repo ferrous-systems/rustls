@@ -219,12 +219,44 @@ impl ExpectCertificate {
                 error,
             }))
         } else {
-            Ok(CommonState::Expect(ExpectState::ServerKeyExchange {
-                suite: self.suite,
-                randoms: self.randoms,
-                transcript: self.transcript,
-            }))
+            Ok(CommonState::Expect(ExpectState::ServerKeyExchange(
+                ExpectServerKeyExchange {
+                    suite: self.suite,
+                    randoms: self.randoms,
+                    transcript: self.transcript,
+                },
+            )))
         }
+    }
+
+    pub(crate) fn get_transcript_mut(&mut self) -> Option<&mut HandshakeHash> {
+        Some(&mut self.transcript)
+    }
+}
+
+pub(crate) struct ExpectServerKeyExchange {
+    suite: &'static Tls12CipherSuite,
+    randoms: ConnectionRandoms,
+    transcript: HandshakeHash,
+}
+impl ExpectServerKeyExchange {
+    pub(crate) fn process_message(
+        self,
+        _common: &mut LlConnectionCommon,
+        msg: Message,
+    ) -> Result<CommonState, Error> {
+        let opaque_kx = require_handshake_msg_move!(
+            msg,
+            HandshakeType::ServerKeyExchange,
+            HandshakePayload::ServerKeyExchange
+        )?;
+
+        Ok(CommonState::Expect(ExpectState::ServerHelloDone {
+            suite: self.suite,
+            randoms: self.randoms,
+            opaque_kx,
+            transcript: self.transcript,
+        }))
     }
 
     pub(crate) fn get_transcript_mut(&mut self) -> Option<&mut HandshakeHash> {

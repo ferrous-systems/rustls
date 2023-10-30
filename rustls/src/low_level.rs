@@ -9,7 +9,8 @@ use std::sync::Arc;
 
 use crate::check::{inappropriate_handshake_message, inappropriate_message};
 use crate::client::low_level::{
-    ExpectCertificate, ExpectServerHello, SendClientHello, WriteClientHello,
+    ExpectCertificate, ExpectServerHello, ExpectServerKeyExchange, SendClientHello,
+    WriteClientHello,
 };
 use crate::client::tls12::ServerKxDetails;
 use crate::conn::ConnectionRandoms;
@@ -79,11 +80,7 @@ impl GeneratedMessage {
 pub(crate) enum ExpectState {
     ServerHello(ExpectServerHello),
     Certificate(ExpectCertificate),
-    ServerKeyExchange {
-        suite: &'static Tls12CipherSuite,
-        randoms: ConnectionRandoms,
-        transcript: HandshakeHash,
-    },
+    ServerKeyExchange(ExpectServerKeyExchange),
     ServerHelloDone {
         suite: &'static Tls12CipherSuite,
         opaque_kx: ServerKeyExchangePayload,
@@ -238,10 +235,11 @@ impl LlConnectionCommon {
                         ExpectState::ServerHello { .. } | ExpectState::ChangeCipherSpec { .. } => {
                             None
                         }
-                        ExpectState::ServerKeyExchange { transcript, .. }
-                        | ExpectState::ServerHelloDone { transcript, .. }
+                        ExpectState::ServerHelloDone { transcript, .. }
                         | ExpectState::Finished { transcript } => Some(transcript),
                         ExpectState::Certificate(state) => state.get_transcript_mut(),
+
+                        ExpectState::ServerKeyExchange(state) => state.get_transcript_mut(),
                     };
 
                     let message = match self.read_message(incoming_tls, transcript) {
@@ -574,24 +572,7 @@ impl LlConnectionCommon {
             ExpectState::ServerHello(state) => state.process_message(self, msg)?,
 
             ExpectState::Certificate(state) => state.process_message(self, msg)?,
-            ExpectState::ServerKeyExchange {
-                suite,
-                randoms,
-                transcript,
-            } => {
-                let opaque_kx = require_handshake_msg_move!(
-                    msg,
-                    HandshakeType::ServerKeyExchange,
-                    HandshakePayload::ServerKeyExchange
-                )?;
-
-                CommonState::Expect(ExpectState::ServerHelloDone {
-                    suite,
-                    randoms,
-                    opaque_kx,
-                    transcript,
-                })
-            }
+            ExpectState::ServerKeyExchange(state) => state.process_message(self, msg)?, 
             ExpectState::ServerHelloDone {
                 suite,
                 randoms,
