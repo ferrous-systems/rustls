@@ -84,12 +84,7 @@ pub(crate) enum WriteState {
     ChangeCipherSpec(WriteChangeCipherSpec),
     Finished(WriteFinished),
     Alert(WriteAlert),
-    Retry {
-        plain_msg: PlainMessage,
-        index: usize,
-        needs_encryption: bool,
-        next_state: Box<CommonState>,
-    },
+    Retry(RetryWrite),
 }
 
 pub(crate) struct WriteAlert {
@@ -112,6 +107,21 @@ impl WriteAlert {
             Message::build_alert(AlertLevel::Fatal, self.description),
             CommonState::Send(Box::new(SendAlert { error: self.error })),
         )
+    }
+}
+
+pub(crate) struct RetryWrite {
+    plain_msg: PlainMessage,
+    index: usize,
+    needs_encryption: bool,
+    next_state: Box<CommonState>,
+}
+
+impl RetryWrite {
+    fn generate_message(self, _conn: &mut LlConnectionCommon) -> GeneratedMessage {
+        GeneratedMessage::new(self.plain_msg, *self.next_state)
+            .skip(self.index)
+            .require_encryption(self.needs_encryption)
     }
 }
 
@@ -298,14 +308,7 @@ impl LlConnectionCommon {
             WriteState::ChangeCipherSpec(state) => state.generate_message(self),
             WriteState::Finished(state) => state.generate_message(self),
             WriteState::Alert(state) => state.generate_message(self),
-            WriteState::Retry {
-                plain_msg,
-                index,
-                needs_encryption,
-                next_state,
-            } => GeneratedMessage::new(plain_msg, *next_state)
-                .skip(index)
-                .require_encryption(needs_encryption),
+            WriteState::Retry(state) => state.generate_message(self),
         }
     }
 
@@ -342,12 +345,12 @@ impl LlConnectionCommon {
 
                 drop(iter);
 
-                self.state = CommonState::Write(WriteState::Retry {
+                self.state = CommonState::Write(WriteState::Retry(RetryWrite {
                     plain_msg,
                     index,
                     needs_encryption,
                     next_state: Box::new(next_state),
-                });
+                }));
 
                 return Err(EncryptError::InsufficientSize(InsufficientSizeError {
                     required_size,
