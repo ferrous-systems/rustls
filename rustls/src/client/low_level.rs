@@ -478,11 +478,25 @@ impl WriteChangeCipherSpec {
         };
         log_msg(&msg, false);
 
-        let next_state = CommonState::Send(SendState::ChangeCipherSpec {
+        let next_state = CommonState::Send(SendState::ChangeCipherSpec(SendChangeCipherSpec {
             secrets: self.secrets,
             transcript: self.transcript,
-        });
+        }));
 
         GeneratedMessage::new(msg, next_state)
+    }
+}
+
+pub(crate) struct SendChangeCipherSpec {
+    secrets: ConnectionSecrets,
+    transcript: HandshakeHash,
+}
+
+impl SendChangeCipherSpec {
+    pub(crate) fn tls_data_done(self) -> CommonState {
+        CommonState::Write(WriteState::Finished {
+            secrets: self.secrets,
+            transcript: self.transcript,
+        })
     }
 }
