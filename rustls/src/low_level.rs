@@ -7,10 +7,10 @@ use alloc::boxed::Box;
 use std::sync::Arc;
 
 use crate::client::low_level::{
-    ExpectCertificate, ExpectChangeCipherSpec, ExpectServerHello, ExpectServerHelloDone,
-    ExpectServerKeyExchange, SendChangeCipherSpec, SendClientHello, SendClientKeyExchange,
-    SendFinished, SetupClientEncryption, WriteChangeCipherSpec, WriteClientHello,
-    WriteClientKeyExchange, WriteFinished,
+    ExpectCertificate, ExpectChangeCipherSpec, ExpectFinished, ExpectServerHello,
+    ExpectServerHelloDone, ExpectServerKeyExchange, SendChangeCipherSpec, SendClientHello,
+    SendClientKeyExchange, SendFinished, SetupClientEncryption, WriteChangeCipherSpec,
+    WriteClientHello, WriteClientKeyExchange, WriteFinished,
 };
 use crate::crypto::cipher::{OpaqueMessage, PlainMessage};
 use crate::hash_hs::HandshakeHash;
@@ -22,10 +22,10 @@ use crate::msgs::message::MessageError;
 use crate::{
     msgs::{
         fragmenter::MessageFragmenter,
-        handshake::{HandshakeMessagePayload, HandshakePayload},
+        handshake::HandshakeMessagePayload,
         message::{Message, MessagePayload},
     },
-    ClientConfig, Error, HandshakeType, ProtocolVersion,
+    ClientConfig, Error, ProtocolVersion,
 };
 use crate::{AlertDescription, ContentType, InvalidMessage, ServerName};
 
@@ -74,7 +74,7 @@ pub(crate) enum ExpectState {
     ServerKeyExchange(ExpectServerKeyExchange),
     ServerHelloDone(ExpectServerHelloDone),
     ChangeCipherSpec(ExpectChangeCipherSpec),
-    Finished { transcript: HandshakeHash },
+    Finished(ExpectFinished),
 }
 
 pub(crate) enum WriteState {
@@ -189,7 +189,7 @@ impl LlConnectionCommon {
                 CommonState::Expect(mut expect_state) => {
                     let transcript = match &mut expect_state {
                         ExpectState::ChangeCipherSpec { .. } => None,
-                        ExpectState::Finished { transcript } => Some(transcript),
+                        ExpectState::Finished(state) => state.get_transcript_mut(),
                         ExpectState::ServerHello(state) => state.get_transcript_mut(),
                         ExpectState::Certificate(state) => state.get_transcript_mut(),
 
@@ -422,15 +422,7 @@ impl LlConnectionCommon {
             ExpectState::ServerKeyExchange(state) => state.process_message(self, msg)?,
             ExpectState::ServerHelloDone(state) => state.process_message(self, msg)?,
             ExpectState::ChangeCipherSpec(state) => state.process_message(self, msg)?,
-            ExpectState::Finished { .. } => {
-                let _ = require_handshake_msg!(
-                    msg,
-                    HandshakeType::Finished,
-                    HandshakePayload::Finished
-                )?;
-
-                CommonState::HandshakeDone
-            }
+            ExpectState::Finished(state) => state.process_message(self, msg)?,
         };
 
         Ok(state)

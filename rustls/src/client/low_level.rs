@@ -557,14 +557,33 @@ impl ExpectChangeCipherSpec {
         match msg.payload {
             MessagePayload::ChangeCipherSpec(_) => {
                 common.record_layer.start_decrypting();
-                Ok(CommonState::Expect(ExpectState::Finished {
+                Ok(CommonState::Expect(ExpectState::Finished(ExpectFinished {
                     transcript: self.transcript,
-                }))
+                })))
             }
             payload => Err(inappropriate_message(
                 &payload,
                 &[ContentType::ChangeCipherSpec],
             )),
         }
+    }
+}
+
+pub(crate) struct ExpectFinished {
+    transcript: HandshakeHash,
+}
+impl ExpectFinished {
+    pub(crate) fn process_message(
+        self,
+        _common: &mut LlConnectionCommon,
+        msg: Message,
+    ) -> Result<CommonState, Error> {
+        let _ = require_handshake_msg!(msg, HandshakeType::Finished, HandshakePayload::Finished)?;
+
+        Ok(CommonState::HandshakeDone)
+    }
+
+    pub(crate) fn get_transcript_mut(&mut self) -> Option<&mut HandshakeHash> {
+        Some(&mut self.transcript)
     }
 }
