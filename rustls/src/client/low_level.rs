@@ -7,7 +7,7 @@ use core::ops::{Deref, DerefMut};
 use pki_types::UnixTime;
 use std::sync::Arc;
 
-use crate::check::inappropriate_handshake_message;
+use crate::check::{inappropriate_handshake_message, inappropriate_message};
 use crate::conn::ConnectionRandoms;
 use crate::crypto::ActiveKeyExchange;
 use crate::hash_hs::{HandshakeHash, HandshakeHashBuffer};
@@ -538,8 +538,33 @@ pub(crate) struct SendFinished {
 
 impl SendFinished {
     pub(crate) fn tls_data_done(self) -> CommonState {
-        CommonState::Expect(ExpectState::ChangeCipherSpec {
+        CommonState::Expect(ExpectState::ChangeCipherSpec(ExpectChangeCipherSpec {
             transcript: self.transcript,
-        })
+        }))
+    }
+}
+
+pub(crate) struct ExpectChangeCipherSpec {
+    transcript: HandshakeHash,
+}
+
+impl ExpectChangeCipherSpec {
+    pub(crate) fn process_message(
+        self,
+        common: &mut LlConnectionCommon,
+        msg: Message,
+    ) -> Result<CommonState, Error> {
+        match msg.payload {
+            MessagePayload::ChangeCipherSpec(_) => {
+                common.record_layer.start_decrypting();
+                Ok(CommonState::Expect(ExpectState::Finished {
+                    transcript: self.transcript,
+                }))
+            }
+            payload => Err(inappropriate_message(
+                &payload,
+                &[ContentType::ChangeCipherSpec],
+            )),
+        }
     }
 }

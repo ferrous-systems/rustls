@@ -6,11 +6,11 @@ use alloc::boxed::Box;
 
 use std::sync::Arc;
 
-use crate::check::inappropriate_message;
 use crate::client::low_level::{
-    ExpectCertificate, ExpectServerHello, ExpectServerHelloDone, ExpectServerKeyExchange,
-    SendChangeCipherSpec, SendClientHello, SendClientKeyExchange, SetupClientEncryption,
-    WriteChangeCipherSpec, WriteClientHello, WriteClientKeyExchange, WriteFinished, SendFinished,
+    ExpectCertificate, ExpectChangeCipherSpec, ExpectServerHello, ExpectServerHelloDone,
+    ExpectServerKeyExchange, SendChangeCipherSpec, SendClientHello, SendClientKeyExchange,
+    SendFinished, SetupClientEncryption, WriteChangeCipherSpec, WriteClientHello,
+    WriteClientKeyExchange, WriteFinished,
 };
 use crate::crypto::cipher::{OpaqueMessage, PlainMessage};
 use crate::hash_hs::HandshakeHash;
@@ -73,7 +73,7 @@ pub(crate) enum ExpectState {
     Certificate(ExpectCertificate),
     ServerKeyExchange(ExpectServerKeyExchange),
     ServerHelloDone(ExpectServerHelloDone),
-    ChangeCipherSpec { transcript: HandshakeHash },
+    ChangeCipherSpec(ExpectChangeCipherSpec),
     Finished { transcript: HandshakeHash },
 }
 
@@ -278,7 +278,7 @@ impl LlConnectionCommon {
             WriteState::ClientHello(state) => state.generate_message(self),
             WriteState::ClientKeyExchange(state) => state.generate_message(self),
             WriteState::ChangeCipherSpec(state) => state.generate_message(self),
-            WriteState::Finished(state) => state.generate_message(self), 
+            WriteState::Finished(state) => state.generate_message(self),
             WriteState::Alert { description, error } => GeneratedMessage::new(
                 Message::build_alert(AlertLevel::Fatal, description),
                 CommonState::Send(SendState::Alert(error)),
@@ -421,18 +421,7 @@ impl LlConnectionCommon {
             ExpectState::Certificate(state) => state.process_message(self, msg)?,
             ExpectState::ServerKeyExchange(state) => state.process_message(self, msg)?,
             ExpectState::ServerHelloDone(state) => state.process_message(self, msg)?,
-            ExpectState::ChangeCipherSpec { transcript } => match msg.payload {
-                MessagePayload::ChangeCipherSpec(_) => {
-                    self.record_layer.start_decrypting();
-                    CommonState::Expect(ExpectState::Finished { transcript })
-                }
-                payload => {
-                    return Err(inappropriate_message(
-                        &payload,
-                        &[ContentType::ChangeCipherSpec],
-                    ));
-                }
-            },
+            ExpectState::ChangeCipherSpec(state) => state.process_message(self, msg)?,
             ExpectState::Finished { .. } => {
                 let _ = require_handshake_msg!(
                     msg,
