@@ -6,10 +6,7 @@ use alloc::boxed::Box;
 
 use std::sync::Arc;
 
-use crate::client::low_level::{
-    SetupClientEncryption, WriteChangeCipherSpec, WriteClientHello, WriteClientKeyExchange,
-    WriteFinished,
-};
+use crate::client::low_level::{SetupClientEncryption, WriteClientHello};
 use crate::crypto::cipher::{OpaqueMessage, PlainMessage};
 use crate::hash_hs::HandshakeHash;
 use crate::internal::record_layer::RecordLayer;
@@ -78,13 +75,8 @@ pub(crate) trait ExpectState {
     }
 }
 
-pub(crate) enum WriteState {
-    ClientHello(WriteClientHello),
-    ClientKeyExchange(WriteClientKeyExchange),
-    ChangeCipherSpec(WriteChangeCipherSpec),
-    Finished(WriteFinished),
-    Alert(WriteAlert),
-    Retry(RetryWrite),
+pub(crate) trait WriteState {
+    fn generate_message(self: Box<Self>, conn: &mut LlConnectionCommon) -> GeneratedMessage;
 }
 
 pub(crate) struct WriteAlert {
@@ -101,8 +93,8 @@ impl WriteAlert {
     }
 }
 
-impl WriteAlert {
-    fn generate_message(self, _conn: &mut LlConnectionCommon) -> GeneratedMessage {
+impl WriteState for WriteAlert {
+    fn generate_message(self: Box<Self>, _conn: &mut LlConnectionCommon) -> GeneratedMessage {
         GeneratedMessage::new(
             Message::build_alert(AlertLevel::Fatal, self.description),
             CommonState::Send(Box::new(SendAlert { error: self.error })),
@@ -117,8 +109,8 @@ pub(crate) struct RetryWrite {
     next_state: Box<CommonState>,
 }
 
-impl RetryWrite {
-    fn generate_message(self, _conn: &mut LlConnectionCommon) -> GeneratedMessage {
+impl WriteState for RetryWrite {
+    fn generate_message(self: Box<Self>, _conn: &mut LlConnectionCommon) -> GeneratedMessage {
         GeneratedMessage::new(self.plain_msg, *self.next_state)
             .skip(self.index)
             .require_encryption(self.needs_encryption)
@@ -146,7 +138,7 @@ pub(crate) enum CommonState {
         expect_state: Box<dyn ExpectState>,
     },
     Expect(Box<dyn ExpectState>),
-    Write(WriteState),
+    Write(Box<dyn WriteState>),
     Send(Box<dyn SendState>),
     SetupClientEncryption(SetupClientEncryption),
     HandshakeDone,
@@ -173,9 +165,7 @@ impl LlConnectionCommon {
     /// FIXME: docs
     pub fn new(config: Arc<ClientConfig>, name: ServerName) -> Result<Self, Error> {
         Ok(Self {
-            state: CommonState::Write(WriteState::ClientHello(WriteClientHello::new(
-                config.as_ref(),
-            )?)),
+            state: CommonState::Write(Box::new(WriteClientHello::new(config.as_ref())?)),
             config,
             name,
             record_layer: RecordLayer::new(),
@@ -301,17 +291,6 @@ impl LlConnectionCommon {
         }
     }
 
-    fn generate_message(&mut self, write_state: WriteState) -> GeneratedMessage {
-        match write_state {
-            WriteState::ClientHello(state) => state.generate_message(self),
-            WriteState::ClientKeyExchange(state) => state.generate_message(self),
-            WriteState::ChangeCipherSpec(state) => state.generate_message(self),
-            WriteState::Finished(state) => state.generate_message(self),
-            WriteState::Alert(state) => state.generate_message(self),
-            WriteState::Retry(state) => state.generate_message(self),
-        }
-    }
-
     fn encrypt_tls_data(&mut self, outgoing_tls: &mut [u8]) -> Result<usize, EncryptError> {
         let message_fragmenter = MessageFragmenter::default();
         let GeneratedMessage {
@@ -320,7 +299,7 @@ impl LlConnectionCommon {
             skip_index,
             next_state,
         } = match self.state.take() {
-            CommonState::Write(write_state) => self.generate_message(write_state),
+            CommonState::Write(state) => state.generate_message(self),
             _ => unreachable!(),
         };
 
@@ -345,7 +324,7 @@ impl LlConnectionCommon {
 
                 drop(iter);
 
-                self.state = CommonState::Write(WriteState::Retry(RetryWrite {
+                self.state = CommonState::Write(Box::new(RetryWrite {
                     plain_msg,
                     index,
                     needs_encryption,
@@ -424,7 +403,7 @@ impl LlConnectionCommon {
         curr_state: CommonState,
     ) -> Result<(), Error> {
         self.state = if let AlertLevel::Unknown(_) = alert.level {
-            CommonState::Write(WriteState::Alert(WriteAlert::new(
+            CommonState::Write(Box::new(WriteAlert::new(
                 AlertDescription::IllegalParameter,
                 Error::AlertReceived(alert.description),
             )))

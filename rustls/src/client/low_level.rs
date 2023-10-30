@@ -70,8 +70,10 @@ impl WriteClientHello {
             random: Random::new(config.provider)?,
         })
     }
+}
 
-    pub(crate) fn generate_message(self, common: &mut LlConnectionCommon) -> GeneratedMessage {
+impl WriteState for WriteClientHello {
+    fn generate_message(self: Box<Self>, common: &mut LlConnectionCommon) -> GeneratedMessage {
         let support_tls12 = common
             .config
             .supports_version(ProtocolVersion::TLSv1_2);
@@ -187,7 +189,7 @@ impl ExpectState for ExpectServerHello {
                 transcript,
             })))
         } else {
-            Ok(CommonState::Write(WriteState::Alert(WriteAlert::new(
+            Ok(CommonState::Write(Box::new(WriteAlert::new(
                 AlertDescription::HandshakeFailure,
                 PeerMisbehaved::SelectedUnofferedCipherSuite,
             ))))
@@ -218,7 +220,7 @@ impl ExpectState for ExpectCertificate {
             .verifier
             .verify_server_cert(&payload[0], &[], &common.name, &[], UnixTime::now())
         {
-            Ok(CommonState::Write(WriteState::Alert(WriteAlert::new(
+            Ok(CommonState::Write(Box::new(WriteAlert::new(
                 match &error {
                     Error::InvalidCertificate(e) => e.clone().into(),
                     Error::PeerMisbehaved(_) => AlertDescription::IllegalParameter,
@@ -312,7 +314,7 @@ impl ExpectState for ExpectServerHelloDone {
                     let ecdh_params = ServerEcdhParams::read(&mut rd)?;
 
                     if rd.any_left() {
-                        Ok(CommonState::Write(WriteState::Alert(WriteAlert::new(
+                        Ok(CommonState::Write(Box::new(WriteAlert::new(
                             AlertDescription::DecodeError,
                             InvalidMessage::InvalidDhParams,
                         ))))
@@ -324,23 +326,21 @@ impl ExpectState for ExpectServerHelloDone {
                             .start()
                             .map_err(|_| Error::FailedToGetRandomBytes)?;
 
-                        Ok(CommonState::Write(WriteState::ClientKeyExchange(
-                            WriteClientKeyExchange {
-                                suite: self.suite,
-                                kx,
-                                ecdh_params,
-                                randoms: self.randoms,
-                                transcript: self.transcript,
-                            },
-                        )))
+                        Ok(CommonState::Write(Box::new(WriteClientKeyExchange {
+                            suite: self.suite,
+                            kx,
+                            ecdh_params,
+                            randoms: self.randoms,
+                            transcript: self.transcript,
+                        })))
                     } else {
-                        Ok(CommonState::Write(WriteState::Alert(WriteAlert::new(
+                        Ok(CommonState::Write(Box::new(WriteAlert::new(
                             AlertDescription::IllegalParameter,
                             PeerMisbehaved::IllegalHelloRetryRequestWithUnofferedNamedGroup,
                         ))))
                     }
                 }
-                None => Ok(CommonState::Write(WriteState::Alert(WriteAlert::new(
+                None => Ok(CommonState::Write(Box::new(WriteAlert::new(
                     AlertDescription::DecodeError,
                     InvalidMessage::MissingKeyExchange,
                 )))),
@@ -370,8 +370,8 @@ pub(crate) struct WriteClientKeyExchange {
     randoms: ConnectionRandoms,
     transcript: HandshakeHash,
 }
-impl WriteClientKeyExchange {
-    pub(crate) fn generate_message(mut self, _common: &mut LlConnectionCommon) -> GeneratedMessage {
+impl WriteState for WriteClientKeyExchange {
+    fn generate_message(mut self: Box<Self>, _common: &mut LlConnectionCommon) -> GeneratedMessage {
         let mut buf = Vec::new();
         let ecpoint = PayloadU8::new(Vec::from(self.kx.pub_key()));
         ecpoint.encode(&mut buf);
@@ -447,7 +447,7 @@ pub(crate) struct SendClientKeyExchange {
 
 impl SendState for SendClientKeyExchange {
     fn tls_data_done(self: Box<Self>) -> CommonState {
-        CommonState::Write(WriteState::ChangeCipherSpec(WriteChangeCipherSpec {
+        CommonState::Write(Box::new(WriteChangeCipherSpec {
             secrets: self.secrets,
             transcript: self.transcript,
         }))
@@ -458,8 +458,8 @@ pub(crate) struct WriteChangeCipherSpec {
     secrets: ConnectionSecrets,
     transcript: HandshakeHash,
 }
-impl WriteChangeCipherSpec {
-    pub(crate) fn generate_message(self, _common: &mut LlConnectionCommon) -> GeneratedMessage {
+impl WriteState for WriteChangeCipherSpec {
+    fn generate_message(self: Box<Self>, _common: &mut LlConnectionCommon) -> GeneratedMessage {
         let msg = Message {
             version: ProtocolVersion::TLSv1_2,
             payload: MessagePayload::ChangeCipherSpec(ChangeCipherSpecPayload {}),
@@ -482,7 +482,7 @@ pub(crate) struct SendChangeCipherSpec {
 
 impl SendState for SendChangeCipherSpec {
     fn tls_data_done(self: Box<Self>) -> CommonState {
-        CommonState::Write(WriteState::Finished(WriteFinished {
+        CommonState::Write(Box::new(WriteFinished {
             secrets: self.secrets,
             transcript: self.transcript,
         }))
@@ -493,8 +493,8 @@ pub(crate) struct WriteFinished {
     secrets: ConnectionSecrets,
     transcript: HandshakeHash,
 }
-impl WriteFinished {
-    pub(crate) fn generate_message(mut self, _common: &mut LlConnectionCommon) -> GeneratedMessage {
+impl WriteState for WriteFinished {
+    fn generate_message(mut self: Box<Self>, _common: &mut LlConnectionCommon) -> GeneratedMessage {
         let vh = self.transcript.get_current_hash();
         let verify_data = self.secrets.client_verify_data(&vh);
         let verify_data_payload = Payload::new(verify_data);
