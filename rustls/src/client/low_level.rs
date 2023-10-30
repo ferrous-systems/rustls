@@ -567,6 +567,10 @@ impl ExpectChangeCipherSpec {
             )),
         }
     }
+
+    pub(crate) fn get_transcript_mut(&mut self) -> Option<&mut HandshakeHash> {
+        None
+    }
 }
 
 pub(crate) struct ExpectFinished {

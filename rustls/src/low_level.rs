@@ -188,11 +188,10 @@ impl LlConnectionCommon {
                 }
                 CommonState::Expect(mut expect_state) => {
                     let transcript = match &mut expect_state {
-                        ExpectState::ChangeCipherSpec { .. } => None,
+                        ExpectState::ChangeCipherSpec(state) => state.get_transcript_mut(),
                         ExpectState::Finished(state) => state.get_transcript_mut(),
                         ExpectState::ServerHello(state) => state.get_transcript_mut(),
                         ExpectState::Certificate(state) => state.get_transcript_mut(),
-
                         ExpectState::ServerKeyExchange(state) => state.get_transcript_mut(),
                         ExpectState::ServerHelloDone(state) => state.get_transcript_mut(),
                     };
