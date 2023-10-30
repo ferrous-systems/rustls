@@ -152,19 +152,21 @@ pub struct LlConnectionCommon {
     name: ServerName,
     state: CommonState,
     record_layer: RecordLayer,
+    random: Random,
     offset: usize,
 }
 
 impl LlConnectionCommon {
     /// FIXME: docs
-    pub fn new(config: Arc<ClientConfig>, name: ServerName) -> Self {
-        Self {
+    pub fn new(config: Arc<ClientConfig>, name: ServerName) -> Result<Self, Error> {
+        Ok(Self {
+            random: Random::new(config.provider)?,
             config,
             name,
             state: CommonState::Write(WriteState::ClientHello),
             record_layer: RecordLayer::new(),
             offset: 0,
-        }
+        })
     }
 
     /// Processes TLS records in the `incoming_tls` buffer
@@ -332,7 +334,7 @@ impl LlConnectionCommon {
                     typ: HandshakeType::ClientHello,
                     payload: HandshakePayload::ClientHello(ClientHelloPayload {
                         client_version: ProtocolVersion::TLSv1_2,
-                        random: Random([0u8; 32]),
+                        random: self.random,
                         session_id: SessionId::empty(),
                         cipher_suites: self
                             .config
@@ -621,7 +623,7 @@ impl LlConnectionCommon {
 
                     CommonState::Expect(ExpectState::Certificate {
                         suite,
-                        randoms: ConnectionRandoms::new(Random([0u8; 32]), payload.random),
+                        randoms: ConnectionRandoms::new(self.random, payload.random),
                         transcript,
                     })
                 } else {

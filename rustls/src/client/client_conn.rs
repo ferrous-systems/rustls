@@ -145,7 +145,7 @@ pub struct ClientConfig {
     pub(crate) kx_groups: Vec<&'static dyn SupportedKxGroup>,
 
     /// Source of randomness and other crypto.
-    pub(super) provider: &'static dyn CryptoProvider,
+    pub(crate) provider: &'static dyn CryptoProvider,
 
     /// Which ALPN protocols we include in our client hello.
     /// If empty, no ALPN extension is sent.

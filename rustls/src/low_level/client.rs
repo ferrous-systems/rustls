@@ -30,7 +30,7 @@ impl LlClientConnection {
     /// FIXME: docs
     pub fn new(config: Arc<ClientConfig>, name: ServerName) -> Result<Self, Error> {
         Ok(Self {
-            conn: LlConnectionCommon::new(config, name),
+            conn: LlConnectionCommon::new(config, name)?,
         })
     }
 }
