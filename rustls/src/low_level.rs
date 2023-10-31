@@ -6,7 +6,7 @@ use alloc::boxed::Box;
 
 use std::sync::Arc;
 
-use crate::client::low_level::{SetupClientEncryption, WriteClientHello};
+use crate::client::low_level::SetupClientEncryption;
 use crate::crypto::cipher::{OpaqueMessage, PlainMessage};
 use crate::hash_hs::HandshakeHash;
 use crate::internal::record_layer::RecordLayer;
@@ -22,7 +22,7 @@ use crate::{
     },
     ClientConfig, Error, ProtocolVersion,
 };
-use crate::{AlertDescription, ContentType, InvalidMessage, ServerName};
+use crate::{AlertDescription, ContentType, InvalidMessage};
 
 pub(crate) fn log_msg(msg: &Message, read: bool) {
     let verb = if read { "Read" } else { "Write" };
@@ -155,7 +155,6 @@ impl CommonState {
 /// both `LlClientConnection` and `LlServerConnection` implement `DerefMut<Target = LlConnectionCommon>`
 pub struct LlConnectionCommon {
     pub(crate) config: Arc<ClientConfig>,
-    pub(crate) name: ServerName,
     pub(crate) state: CommonState,
     pub(crate) record_layer: RecordLayer,
     pub(crate) offset: usize,
@@ -163,11 +162,10 @@ pub struct LlConnectionCommon {
 
 impl LlConnectionCommon {
     /// FIXME: docs
-    pub fn new(config: Arc<ClientConfig>, name: ServerName) -> Result<Self, Error> {
+    pub(crate) fn new(config: Arc<ClientConfig>, state: CommonState) -> Result<Self, Error> {
         Ok(Self {
-            state: CommonState::Write(Box::new(WriteClientHello::new(config.as_ref())?)),
+            state,
             config,
-            name,
             record_layer: RecordLayer::new(),
             offset: 0,
         })

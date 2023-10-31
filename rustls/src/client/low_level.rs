@@ -52,19 +52,23 @@ impl DerefMut for LlClientConnection {
 impl LlClientConnection {
     /// FIXME: docs
     pub fn new(config: Arc<ClientConfig>, name: ServerName) -> Result<Self, Error> {
+        let state = CommonState::Write(Box::new(WriteClientHello::new(config.as_ref(), name)?));
+
         Ok(Self {
-            conn: LlConnectionCommon::new(config, name)?,
+            conn: LlConnectionCommon::new(config, state)?,
         })
     }
 }
 
 pub(crate) struct WriteClientHello {
+    name: ServerName,
     random: Random,
 }
 
 impl WriteClientHello {
-    pub(crate) fn new(config: &ClientConfig) -> Result<Self, Error> {
+    fn new(config: &ClientConfig, name: ServerName) -> Result<Self, Error> {
         Ok(Self {
+            name,
             random: Random::new(config.provider)?,
         })
     }
@@ -128,6 +132,7 @@ impl WriteState for WriteClientHello {
         let mut transcript_buffer = HandshakeHashBuffer::new();
         transcript_buffer.add_message(&msg);
         let next_state = CommonState::Send(Box::new(SendClientHello {
+            name: self.name,
             transcript_buffer,
             random: self.random,
         }));
@@ -137,6 +142,7 @@ impl WriteState for WriteClientHello {
 }
 
 pub(crate) struct SendClientHello {
+    name: ServerName,
     transcript_buffer: HandshakeHashBuffer,
     random: Random,
 }
@@ -144,6 +150,7 @@ pub(crate) struct SendClientHello {
 impl SendState for SendClientHello {
     fn tls_data_done(self: Box<Self>) -> CommonState {
         CommonState::Expect(Box::new(ExpectServerHello {
+            name: self.name,
             transcript_buffer: self.transcript_buffer,
             random: self.random,
         }))
@@ -151,6 +158,7 @@ impl SendState for SendClientHello {
 }
 
 pub(crate) struct ExpectServerHello {
+    name: ServerName,
     transcript_buffer: HandshakeHashBuffer,
     random: Random,
 }
@@ -182,6 +190,7 @@ impl ExpectState for ExpectServerHello {
             };
 
             Ok(CommonState::Expect(Box::new(ExpectCertificate {
+                name: self.name,
                 suite,
                 randoms: ConnectionRandoms::new(self.random, payload.random),
                 transcript,
@@ -196,6 +205,7 @@ impl ExpectState for ExpectServerHello {
 }
 
 pub(crate) struct ExpectCertificate {
+    name: ServerName,
     suite: &'static Tls12CipherSuite,
     randoms: ConnectionRandoms,
     transcript: HandshakeHash,
@@ -216,7 +226,7 @@ impl ExpectState for ExpectCertificate {
         if let Err(error) = common
             .config
             .verifier
-            .verify_server_cert(&payload[0], &[], &common.name, &[], UnixTime::now())
+            .verify_server_cert(&payload[0], &[], &self.name, &[], UnixTime::now())
         {
             Ok(CommonState::Write(Box::new(WriteAlert::new(
                 match &error {
