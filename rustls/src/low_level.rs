@@ -63,7 +63,7 @@ impl GeneratedMessage {
     }
 }
 
-pub(crate) trait ExpectState {
+pub(crate) trait ExpectState: Send + 'static {
     fn process_message(
         self: Box<Self>,
         common: &mut LlConnectionCommon,
@@ -75,7 +75,7 @@ pub(crate) trait ExpectState {
     }
 }
 
-pub(crate) trait WriteState {
+pub(crate) trait WriteState: Send + 'static {
     fn generate_message(self: Box<Self>, conn: &mut LlConnectionCommon) -> GeneratedMessage;
 }
 
@@ -117,7 +117,7 @@ impl WriteState for RetryWrite {
     }
 }
 
-pub(crate) trait SendState {
+pub(crate) trait SendState: Send + 'static {
     fn tls_data_done(self: Box<Self>) -> CommonState;
 }
 
