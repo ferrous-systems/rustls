@@ -439,9 +439,9 @@ pub mod client {
     mod client_conn;
     mod common;
     pub(super) mod handy;
-    pub(super) mod hs;
+    mod hs;
     #[cfg(feature = "tls12")]
-    pub(crate) mod tls12;
+    mod tls12;
     mod tls13;
     pub mod low_level;
 

@@ -91,7 +91,7 @@ fn find_session(
     found
 }
 
-pub(crate) fn start_handshake(
+pub(super) fn start_handshake(
     server_name: ServerName,
     extra_exts: Vec<ClientExtension>,
     config: Arc<ClientConfig>,

@@ -135,17 +135,17 @@ pub trait ResolvesClientCert: Send + Sync {
 /// [`RootCertStore`]: crate::RootCertStore
 pub struct ClientConfig {
     /// List of ciphersuites, in preference order.
-    pub(crate) cipher_suites: Vec<SupportedCipherSuite>,
+    pub(super) cipher_suites: Vec<SupportedCipherSuite>,
 
     /// List of supported key exchange algorithms, in preference order -- the
     /// first element is the highest priority.
     ///
     /// The first element in this list is the _default key share algorithm_,
     /// and in TLS1.3 a key share for it is sent in the client hello.
-    pub(crate) kx_groups: Vec<&'static dyn SupportedKxGroup>,
+    pub(super) kx_groups: Vec<&'static dyn SupportedKxGroup>,
 
     /// Source of randomness and other crypto.
-    pub(crate) provider: &'static dyn CryptoProvider,
+    pub(super) provider: &'static dyn CryptoProvider,
 
     /// Which ALPN protocols we include in our client hello.
     /// If empty, no ALPN extension is sent.
@@ -181,7 +181,7 @@ pub struct ClientConfig {
     pub enable_sni: bool,
 
     /// How to verify the server certificate chain.
-    pub(crate) verifier: Arc<dyn verify::ServerCertVerifier>,
+    pub(super) verifier: Arc<dyn verify::ServerCertVerifier>,
 
     /// How to output key material for debugging.  The default
     /// does nothing.
@@ -286,14 +286,14 @@ impl ClientConfig {
         danger::DangerousClientConfig { cfg: self }
     }
 
-    pub(crate) fn find_cipher_suite(&self, suite: CipherSuite) -> Option<SupportedCipherSuite> {
+    pub(super) fn find_cipher_suite(&self, suite: CipherSuite) -> Option<SupportedCipherSuite> {
         self.cipher_suites
             .iter()
             .copied()
             .find(|&scs| scs.suite() == suite)
     }
 
-    pub(crate) fn find_kx_group(&self, group: NamedGroup) -> Option<&'static dyn SupportedKxGroup> {
+    pub(super) fn find_kx_group(&self, group: NamedGroup) -> Option<&'static dyn SupportedKxGroup> {
         self.kx_groups
             .iter()
             .copied()

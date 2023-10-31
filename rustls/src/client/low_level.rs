@@ -30,8 +30,6 @@ use crate::{
     PeerMisbehaved, ProtocolVersion, ServerName, Side, SupportedCipherSuite, Tls12CipherSuite,
 };
 
-use super::tls12::ServerKxDetails;
-
 /// FIXME: docs
 pub struct LlClientConnection {
     conn: LlConnectionCommon,
@@ -308,17 +306,18 @@ impl ExpectState for ExpectServerHelloDone {
                 Some(ecdhe) => {
                     let mut kx_params = Vec::new();
                     ecdhe.params.encode(&mut kx_params);
-                    let server_kx = ServerKxDetails::new(kx_params, ecdhe.dss);
 
-                    let mut rd = Reader::init(&server_kx.kx_params);
+                    let mut rd = Reader::init(&kx_params);
                     let ecdh_params = ServerEcdhParams::read(&mut rd)?;
 
                     if rd.any_left() {
-                        Ok(CommonState::Write(Box::new(WriteAlert::new(
+                        return Ok(CommonState::Write(Box::new(WriteAlert::new(
                             AlertDescription::DecodeError,
                             InvalidMessage::InvalidDhParams,
-                        ))))
-                    } else if let Some(skxg) = common
+                        ))));
+                    }
+
+                    if let Some(skxg) = common
                         .config
                         .find_kx_group(ecdh_params.curve_params.named_group)
                     {
