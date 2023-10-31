@@ -37,7 +37,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut outgoing_tls = vec![];
     let mut outgoing_used = 0;
 
-    loop {
+    let mut open_connection = true;
+
+    while open_connection {
         let Status { discard, state } =
             conn.process_tls_records(&mut incoming_tls[..incoming_used])?;
 
@@ -95,9 +97,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 incoming_used += read;
             }
 
-            State::ConnectionClosed => {
-                return Ok(());
-            }
+            State::ConnectionClosed => open_connection = false,
         }
 
         // discard TLS records
@@ -108,4 +108,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             incoming_used -= discard;
         }
     }
+
+    assert!(incoming_tls[..incoming_used].is_empty());
+
+    Ok(())
 }
