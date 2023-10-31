@@ -12,8 +12,8 @@ use crate::conn::ConnectionRandoms;
 use crate::crypto::ActiveKeyExchange;
 use crate::hash_hs::{HandshakeHash, HandshakeHashBuffer};
 use crate::low_level::{
-    log_msg, CommonState, ExpectState, GeneratedMessage, LlConnectionCommon, SendState, WriteAlert,
-    WriteState,
+    log_msg, CommonState, ExpectState, GeneratedMessage, LlConnectionCommon, SendState,
+    SetupEncryptionState, WriteAlert, WriteState,
 };
 use crate::msgs::base::{Payload, PayloadU8};
 use crate::msgs::ccs::ChangeCipherSpecPayload;
@@ -32,11 +32,11 @@ use crate::{
 
 /// FIXME: docs
 pub struct LlClientConnection {
-    conn: LlConnectionCommon,
+    conn: LlConnectionCommon<Arc<ClientConfig>>,
 }
 
 impl Deref for LlClientConnection {
-    type Target = LlConnectionCommon;
+    type Target = LlConnectionCommon<Arc<ClientConfig>>;
 
     fn deref(&self) -> &Self::Target {
         &self.conn
@@ -75,7 +75,12 @@ impl WriteClientHello {
 }
 
 impl WriteState for WriteClientHello {
-    fn generate_message(self: Box<Self>, common: &mut LlConnectionCommon) -> GeneratedMessage {
+    type Data = Arc<ClientConfig>;
+
+    fn generate_message(
+        self: Box<Self>,
+        common: &mut LlConnectionCommon<Self::Data>,
+    ) -> GeneratedMessage<Self::Data> {
         let support_tls12 = common
             .config
             .supports_version(ProtocolVersion::TLSv1_2);
@@ -148,7 +153,9 @@ pub(crate) struct SendClientHello {
 }
 
 impl SendState for SendClientHello {
-    fn tls_data_done(self: Box<Self>) -> CommonState {
+    type Data = Arc<ClientConfig>;
+
+    fn tls_data_done(self: Box<Self>) -> CommonState<Self::Data> {
         CommonState::Expect(Box::new(ExpectServerHello {
             name: self.name,
             transcript_buffer: self.transcript_buffer,
@@ -164,11 +171,13 @@ pub(crate) struct ExpectServerHello {
 }
 
 impl ExpectState for ExpectServerHello {
+    type Data = Arc<ClientConfig>;
+
     fn process_message(
         self: Box<Self>,
-        common: &mut LlConnectionCommon,
+        common: &mut LlConnectionCommon<Self::Data>,
         msg: Message,
-    ) -> Result<CommonState, Error> {
+    ) -> Result<CommonState<Self::Data>, Error> {
         let payload = require_handshake_msg!(
             msg,
             HandshakeType::ServerHello,
@@ -212,11 +221,13 @@ pub(crate) struct ExpectCertificate {
 }
 
 impl ExpectState for ExpectCertificate {
+    type Data = Arc<ClientConfig>;
+
     fn process_message(
         self: Box<Self>,
-        common: &mut LlConnectionCommon,
+        common: &mut LlConnectionCommon<Self::Data>,
         msg: Message,
-    ) -> Result<CommonState, Error> {
+    ) -> Result<CommonState<Self::Data>, Error> {
         let payload = require_handshake_msg_move!(
             msg,
             HandshakeType::Certificate,
@@ -256,11 +267,13 @@ pub(crate) struct ExpectServerKeyExchange {
     transcript: HandshakeHash,
 }
 impl ExpectState for ExpectServerKeyExchange {
+    type Data = Arc<ClientConfig>;
+
     fn process_message(
         self: Box<Self>,
-        _common: &mut LlConnectionCommon,
+        _common: &mut LlConnectionCommon<Self::Data>,
         msg: Message,
-    ) -> Result<CommonState, Error> {
+    ) -> Result<CommonState<Self::Data>, Error> {
         let opaque_kx = require_handshake_msg_move!(
             msg,
             HandshakeType::ServerKeyExchange,
@@ -288,11 +301,13 @@ pub(crate) struct ExpectServerHelloDone {
 }
 
 impl ExpectState for ExpectServerHelloDone {
+    type Data = Arc<ClientConfig>;
+
     fn process_message(
         self: Box<Self>,
-        common: &mut LlConnectionCommon,
+        common: &mut LlConnectionCommon<Self::Data>,
         msg: Message,
-    ) -> Result<CommonState, Error> {
+    ) -> Result<CommonState<Self::Data>, Error> {
         match msg.payload {
             MessagePayload::Handshake {
                 parsed:
@@ -380,7 +395,11 @@ pub(crate) struct WriteClientKeyExchange {
     transcript: HandshakeHash,
 }
 impl WriteState for WriteClientKeyExchange {
-    fn generate_message(mut self: Box<Self>, _common: &mut LlConnectionCommon) -> GeneratedMessage {
+    type Data = Arc<ClientConfig>;
+    fn generate_message(
+        mut self: Box<Self>,
+        _common: &mut LlConnectionCommon<Self::Data>,
+    ) -> GeneratedMessage<Self::Data> {
         let mut buf = Vec::new();
         let ecpoint = PayloadU8::new(Vec::from(self.kx.pub_key()));
         ecpoint.encode(&mut buf);
@@ -397,13 +416,13 @@ impl WriteState for WriteClientKeyExchange {
 
         self.transcript.add_message(&msg);
 
-        let next_state = CommonState::SetupClientEncryption(SetupClientEncryption {
+        let next_state = CommonState::SetupEncryption(Box::new(SetupClientEncryption {
             kx: self.kx,
             peer_pub_key: self.ecdh_params.public.0,
             randoms: self.randoms,
             suite: self.suite,
             transcript: self.transcript,
-        });
+        }));
 
         GeneratedMessage::new(msg, next_state)
     }
@@ -417,11 +436,13 @@ pub(crate) struct SetupClientEncryption {
     transcript: HandshakeHash,
 }
 
-impl SetupClientEncryption {
-    pub(crate) fn setup_encryption(
-        self,
-        common: &mut LlConnectionCommon,
-    ) -> Result<CommonState, Error> {
+impl SetupEncryptionState for SetupClientEncryption {
+    type Data = Arc<ClientConfig>;
+
+    fn setup_encryption(
+        self: Box<Self>,
+        common: &mut LlConnectionCommon<Self::Data>,
+    ) -> Result<CommonState<Self::Data>, Error> {
         {
             let secrets = ConnectionSecrets::from_key_exchange(
                 self.kx,
@@ -455,7 +476,9 @@ pub(crate) struct SendClientKeyExchange {
 }
 
 impl SendState for SendClientKeyExchange {
-    fn tls_data_done(self: Box<Self>) -> CommonState {
+    type Data = Arc<ClientConfig>;
+
+    fn tls_data_done(self: Box<Self>) -> CommonState<Self::Data> {
         CommonState::Write(Box::new(WriteChangeCipherSpec {
             secrets: self.secrets,
             transcript: self.transcript,
@@ -468,7 +491,12 @@ pub(crate) struct WriteChangeCipherSpec {
     transcript: HandshakeHash,
 }
 impl WriteState for WriteChangeCipherSpec {
-    fn generate_message(self: Box<Self>, _common: &mut LlConnectionCommon) -> GeneratedMessage {
+    type Data = Arc<ClientConfig>;
+
+    fn generate_message(
+        self: Box<Self>,
+        _common: &mut LlConnectionCommon<Self::Data>,
+    ) -> GeneratedMessage<Self::Data> {
         let msg = Message {
             version: ProtocolVersion::TLSv1_2,
             payload: MessagePayload::ChangeCipherSpec(ChangeCipherSpecPayload {}),
@@ -490,7 +518,9 @@ pub(crate) struct SendChangeCipherSpec {
 }
 
 impl SendState for SendChangeCipherSpec {
-    fn tls_data_done(self: Box<Self>) -> CommonState {
+    type Data = Arc<ClientConfig>;
+
+    fn tls_data_done(self: Box<Self>) -> CommonState<Self::Data> {
         CommonState::Write(Box::new(WriteFinished {
             secrets: self.secrets,
             transcript: self.transcript,
@@ -503,7 +533,12 @@ pub(crate) struct WriteFinished {
     transcript: HandshakeHash,
 }
 impl WriteState for WriteFinished {
-    fn generate_message(mut self: Box<Self>, _common: &mut LlConnectionCommon) -> GeneratedMessage {
+    type Data = Arc<ClientConfig>;
+
+    fn generate_message(
+        mut self: Box<Self>,
+        _common: &mut LlConnectionCommon<Self::Data>,
+    ) -> GeneratedMessage<Self::Data> {
         let vh = self.transcript.get_current_hash();
         let verify_data = self.secrets.client_verify_data(&vh);
         let verify_data_payload = Payload::new(verify_data);
@@ -534,7 +569,9 @@ pub(crate) struct SendFinished {
 }
 
 impl SendState for SendFinished {
-    fn tls_data_done(self: Box<Self>) -> CommonState {
+    type Data = Arc<ClientConfig>;
+
+    fn tls_data_done(self: Box<Self>) -> CommonState<Self::Data> {
         CommonState::Expect(Box::new(ExpectChangeCipherSpec {
             transcript: self.transcript,
         }))
@@ -546,11 +583,13 @@ pub(crate) struct ExpectChangeCipherSpec {
 }
 
 impl ExpectState for ExpectChangeCipherSpec {
+    type Data = Arc<ClientConfig>;
+
     fn process_message(
         self: Box<Self>,
-        common: &mut LlConnectionCommon,
+        common: &mut LlConnectionCommon<Self::Data>,
         msg: Message,
-    ) -> Result<CommonState, Error> {
+    ) -> Result<CommonState<Self::Data>, Error> {
         match msg.payload {
             MessagePayload::ChangeCipherSpec(_) => {
                 common.record_layer.start_decrypting();
@@ -571,11 +610,13 @@ pub(crate) struct ExpectFinished {
 }
 
 impl ExpectState for ExpectFinished {
+    type Data = Arc<ClientConfig>;
+
     fn process_message(
         self: Box<Self>,
-        _common: &mut LlConnectionCommon,
+        _common: &mut LlConnectionCommon<Self::Data>,
         msg: Message,
-    ) -> Result<CommonState, Error> {
+    ) -> Result<CommonState<Self::Data>, Error> {
         let _ = require_handshake_msg!(msg, HandshakeType::Finished, HandshakePayload::Finished)?;
 
         Ok(CommonState::HandshakeDone)

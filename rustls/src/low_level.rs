@@ -1,12 +1,10 @@
 //! FIXME: docs
 
+use core::marker::PhantomData;
 use core::num::NonZeroUsize;
 
 use alloc::boxed::Box;
 
-use std::sync::Arc;
-
-use crate::client::low_level::SetupClientEncryption;
 use crate::crypto::cipher::{OpaqueMessage, PlainMessage};
 use crate::hash_hs::HandshakeHash;
 use crate::internal::record_layer::RecordLayer;
@@ -20,7 +18,7 @@ use crate::{
         handshake::HandshakeMessagePayload,
         message::{Message, MessagePayload},
     },
-    ClientConfig, Error, ProtocolVersion,
+    Error, ProtocolVersion,
 };
 use crate::{AlertDescription, ContentType, InvalidMessage};
 
@@ -35,15 +33,15 @@ pub(crate) fn log_msg(msg: &Message, read: bool) {
     };
 }
 
-pub(crate) struct GeneratedMessage {
+pub(crate) struct GeneratedMessage<Data> {
     plain_msg: PlainMessage,
     needs_encryption: bool,
     skip_index: usize,
-    next_state: CommonState,
+    next_state: CommonState<Data>,
 }
 
-impl GeneratedMessage {
-    pub(crate) fn new(plain_msg: impl Into<PlainMessage>, next_state: CommonState) -> Self {
+impl<Data> GeneratedMessage<Data> {
+    pub(crate) fn new(plain_msg: impl Into<PlainMessage>, next_state: CommonState<Data>) -> Self {
         Self {
             plain_msg: plain_msg.into(),
             needs_encryption: false,
@@ -64,11 +62,13 @@ impl GeneratedMessage {
 }
 
 pub(crate) trait ExpectState: Send + 'static {
+    type Data;
+
     fn process_message(
         self: Box<Self>,
-        common: &mut LlConnectionCommon,
+        common: &mut LlConnectionCommon<Self::Data>,
         msg: Message,
-    ) -> Result<CommonState, Error>;
+    ) -> Result<CommonState<Self::Data>, Error>;
 
     fn get_transcript_mut(&mut self) -> Option<&mut HandshakeHash> {
         None
@@ -76,41 +76,61 @@ pub(crate) trait ExpectState: Send + 'static {
 }
 
 pub(crate) trait WriteState: Send + 'static {
-    fn generate_message(self: Box<Self>, conn: &mut LlConnectionCommon) -> GeneratedMessage;
+    type Data;
+
+    fn generate_message(
+        self: Box<Self>,
+        conn: &mut LlConnectionCommon<Self::Data>,
+    ) -> GeneratedMessage<Self::Data>;
 }
 
-pub(crate) struct WriteAlert {
+pub(crate) struct WriteAlert<Data> {
     description: AlertDescription,
     error: Error,
+    _marker: PhantomData<Data>,
 }
 
-impl WriteAlert {
+impl<Data> WriteAlert<Data> {
     pub(crate) fn new(description: AlertDescription, error: impl Into<Error>) -> Self {
         Self {
             description,
             error: error.into(),
+            _marker: PhantomData,
         }
     }
 }
 
-impl WriteState for WriteAlert {
-    fn generate_message(self: Box<Self>, _conn: &mut LlConnectionCommon) -> GeneratedMessage {
+impl<Data: 'static + Send> WriteState for WriteAlert<Data> {
+    type Data = Data;
+
+    fn generate_message(
+        self: Box<Self>,
+        _conn: &mut LlConnectionCommon<Self::Data>,
+    ) -> GeneratedMessage<Self::Data> {
         GeneratedMessage::new(
             Message::build_alert(AlertLevel::Fatal, self.description),
-            CommonState::Send(Box::new(SendAlert { error: self.error })),
+            CommonState::Send(Box::new(SendAlert {
+                error: self.error,
+                _marker: PhantomData,
+            })),
         )
     }
 }
 
-pub(crate) struct RetryWrite {
+pub(crate) struct RetryWrite<Data> {
     plain_msg: PlainMessage,
     index: usize,
     needs_encryption: bool,
-    next_state: Box<CommonState>,
+    next_state: Box<CommonState<Data>>,
 }
 
-impl WriteState for RetryWrite {
-    fn generate_message(self: Box<Self>, _conn: &mut LlConnectionCommon) -> GeneratedMessage {
+impl<Data: 'static + Send> WriteState for RetryWrite<Data> {
+    type Data = Data;
+
+    fn generate_message(
+        self: Box<Self>,
+        _conn: &mut LlConnectionCommon<Self::Data>,
+    ) -> GeneratedMessage<Self::Data> {
         GeneratedMessage::new(self.plain_msg, *self.next_state)
             .skip(self.index)
             .require_encryption(self.needs_encryption)
@@ -118,51 +138,65 @@ impl WriteState for RetryWrite {
 }
 
 pub(crate) trait SendState: Send + 'static {
-    fn tls_data_done(self: Box<Self>) -> CommonState;
+    type Data;
+
+    fn tls_data_done(self: Box<Self>) -> CommonState<Self::Data>;
 }
 
-pub(crate) struct SendAlert {
+pub(crate) struct SendAlert<Data> {
     error: Error,
+    _marker: PhantomData<Data>,
 }
 
-impl SendState for SendAlert {
-    fn tls_data_done(self: Box<Self>) -> CommonState {
+impl<Data: Send + 'static> SendState for SendAlert<Data> {
+    type Data = Data;
+
+    fn tls_data_done(self: Box<Self>) -> CommonState<Self::Data> {
         CommonState::Poisoned(self.error)
     }
 }
 
-pub(crate) enum CommonState {
+pub(crate) trait SetupEncryptionState: 'static + Send {
+    type Data;
+
+    fn setup_encryption(
+        self: Box<Self>,
+        common: &mut LlConnectionCommon<Self::Data>,
+    ) -> Result<CommonState<Self::Data>, Error>;
+}
+
+pub(crate) enum CommonState<Data> {
     Unreachable,
     Process {
         message: Message,
-        curr_state: Box<dyn ExpectState>,
+        curr_state: Box<dyn ExpectState<Data = Data>>,
     },
-    Expect(Box<dyn ExpectState>),
-    Write(Box<dyn WriteState>),
-    Send(Box<dyn SendState>),
-    SetupClientEncryption(SetupClientEncryption),
+    Expect(Box<dyn ExpectState<Data = Data>>),
+    Write(Box<dyn WriteState<Data = Data>>),
+    Send(Box<dyn SendState<Data = Data>>),
+    SetupEncryption(Box<dyn SetupEncryptionState<Data = Data>>),
     HandshakeDone,
     Poisoned(Error),
     ConnectionClosed,
 }
 
-impl CommonState {
+impl<Data> CommonState<Data> {
     fn take(&mut self) -> Self {
         core::mem::replace(self, Self::Unreachable)
     }
 }
 
 /// both `LlClientConnection` and `LlServerConnection` implement `DerefMut<Target = LlConnectionCommon>`
-pub struct LlConnectionCommon {
-    pub(crate) config: Arc<ClientConfig>,
-    pub(crate) state: CommonState,
+pub struct LlConnectionCommon<Data> {
+    pub(crate) config: Data,
+    pub(crate) state: CommonState<Data>,
     pub(crate) record_layer: RecordLayer,
     pub(crate) offset: usize,
 }
 
-impl LlConnectionCommon {
+impl<Data: 'static + Send> LlConnectionCommon<Data> {
     /// FIXME: docs
-    pub(crate) fn new(config: Arc<ClientConfig>, state: CommonState) -> Result<Self, Error> {
+    pub(crate) fn new(config: Data, state: CommonState<Data>) -> Result<Self, Error> {
         Ok(Self {
             state,
             config,
@@ -175,7 +209,7 @@ impl LlConnectionCommon {
     pub fn process_tls_records<'c, 'i>(
         &'c mut self,
         incoming_tls: &'i mut [u8],
-    ) -> Result<Status<'c, 'i>, Error> {
+    ) -> Result<Status<'c, 'i, Data>, Error> {
         loop {
             match self.state.take() {
                 CommonState::Unreachable => unreachable!(),
@@ -241,7 +275,7 @@ impl LlConnectionCommon {
                 } => {
                     self.state = curr_state.process_message(self, message)?;
                 }
-                CommonState::SetupClientEncryption(state) => {
+                CommonState::SetupEncryption(state) => {
                     self.state = state.setup_encryption(self)?;
                 }
                 state @ CommonState::HandshakeDone => {
@@ -398,7 +432,7 @@ impl LlConnectionCommon {
     fn handle_alert(
         &mut self,
         alert: crate::msgs::alert::AlertMessagePayload,
-        curr_state: CommonState,
+        curr_state: CommonState<Data>,
     ) -> Result<(), Error> {
         self.state = if let AlertLevel::Unknown(_) = alert.level {
             CommonState::Write(Box::new(WriteAlert::new(
@@ -420,26 +454,26 @@ impl LlConnectionCommon {
 
 /// FIXME: docs
 #[must_use]
-pub struct Status<'c, 'i> {
+pub struct Status<'c, 'i, Data> {
     /// number of bytes that must be discarded from the *front* of `incoming_tls` *after* handling
     /// `state` and *before* the next `process_tls_records` call
     pub discard: usize,
 
     /// the current state of the handshake process
-    pub state: State<'c, 'i>,
+    pub state: State<'c, 'i, Data>,
 }
 
 /// FIXME: docs
-pub enum State<'c, 'i> {
+pub enum State<'c, 'i, Data> {
     /// One, or more, application data record is available
-    AppDataAvailable(AppDataAvailable<'c, 'i>),
+    AppDataAvailable(AppDataAvailable<'c, 'i, Data>),
 
     /// A Handshake record must be encrypted into the `outgoing_tls` buffer
-    MustEncryptTlsData(MustEncryptTlsData<'c>),
+    MustEncryptTlsData(MustEncryptTlsData<'c, Data>),
 
     /// TLS records related to the handshake have been placed in the `outgoing_tls` buffer and must
     /// be transmitted to continue with the handshake process
-    MustTransmitTlsData(MustTransmitTlsData<'c>),
+    MustTransmitTlsData(MustTransmitTlsData<'c, Data>),
 
     /// More TLS data needs to be added to the `incoming_tls` buffer to continue with the handshake
     NeedsMoreTlsData {
@@ -449,7 +483,7 @@ pub enum State<'c, 'i> {
     },
 
     /// Handshake is complete.
-    TrafficTransit(TrafficTransit<'c>),
+    TrafficTransit(TrafficTransit<'c, Data>),
 
     /// Connection is being closed.
     ConnectionClosed,
@@ -468,14 +502,14 @@ pub struct AppDataRecord<'i> {
 }
 
 /// FIXME: docs
-pub struct AppDataAvailable<'c, 'i> {
+pub struct AppDataAvailable<'c, 'i, Data> {
     /// FIXME: docs
-    conn: &'c mut LlConnectionCommon,
+    conn: &'c mut LlConnectionCommon<Data>,
     /// FIXME: docs
     incoming_tls: Option<&'i mut [u8]>,
 }
 
-impl<'c, 'i> AppDataAvailable<'c, 'i> {
+impl<'c, 'i, Data> AppDataAvailable<'c, 'i, Data> {
     /// FIXME: docs
     pub fn next_record<'a>(&'a mut self) -> Option<Result<AppDataRecord<'a>, Error>> {
         let offset = self.conn.offset;
@@ -528,7 +562,7 @@ impl<'c, 'i> AppDataAvailable<'c, 'i> {
     }
 }
 
-impl<'c, 'i> AppDataAvailable<'c, 'i> {
+impl<'c, 'i, Data> AppDataAvailable<'c, 'i, Data> {
     /// returns the payload size of the next app-data record *without* decrypting it
     ///
     /// returns `None` if there are no more app-data records
@@ -553,9 +587,9 @@ pub struct InsufficientSizeError {
 }
 
 /// FIXME: docs
-pub struct MustEncryptTlsData<'c> {
+pub struct MustEncryptTlsData<'c, Data> {
     /// FIXME: docs
-    conn: &'c mut LlConnectionCommon,
+    conn: &'c mut LlConnectionCommon<Data>,
 }
 
 /// An error occurred while encrypting a handshake record
@@ -585,7 +619,7 @@ impl core::fmt::Display for EncryptError {
 
 impl std::error::Error for EncryptError {}
 
-impl<'c> MustEncryptTlsData<'c> {
+impl<'c, Data: 'static + Send> MustEncryptTlsData<'c, Data> {
     /// Encrypts a handshake record into the `outgoing_tls` buffer
     ///
     /// returns the number of bytes that were written into `outgoing_tls`, or an error if
@@ -596,14 +630,14 @@ impl<'c> MustEncryptTlsData<'c> {
 }
 
 /// FIXME: docs
-pub struct MustTransmitTlsData<'c> {
+pub struct MustTransmitTlsData<'c, Data> {
     /// FIXME: docs
-    conn: &'c mut LlConnectionCommon,
+    conn: &'c mut LlConnectionCommon<Data>,
     /// FIXME: docs
-    curr_state: Box<dyn SendState>,
+    curr_state: Box<dyn SendState<Data = Data>>,
 }
 
-impl<'c> MustTransmitTlsData<'c> {
+impl<'c, Data: 'static + Send> MustTransmitTlsData<'c, Data> {
     /// FIXME: docs
     pub fn done(self) {
         self.conn.state = self.curr_state.tls_data_done();
@@ -611,12 +645,12 @@ impl<'c> MustTransmitTlsData<'c> {
 }
 
 /// FIXME: docs
-pub struct TrafficTransit<'c> {
+pub struct TrafficTransit<'c, Data> {
     /// FIXME: docs
-    conn: &'c mut LlConnectionCommon,
+    conn: &'c mut LlConnectionCommon<Data>,
 }
 
-impl<'c> TrafficTransit<'c> {
+impl<'c, Data: 'static + Send> TrafficTransit<'c, Data> {
     /// Encrypts `application_data` into the `outgoing_tls` buffer
     ///
     /// returns the number of bytes that were written into `outgoing_tls`, or an error if
