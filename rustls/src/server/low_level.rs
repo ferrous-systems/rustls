@@ -9,12 +9,15 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::conn::ConnectionRandoms;
+use crate::crypto::SupportedKxGroup;
 use crate::dns_name::DnsName;
 use crate::hash_hs::{HandshakeHash, HandshakeHashBuffer};
-use crate::low_level::{GeneratedMessage, SendState, WriteState};
+use crate::low_level::{GeneratedMessage, IntermediateState, SendState, WriteState, log_msg};
+use crate::msgs::codec::Codec;
 use crate::msgs::enums::ECPointFormat;
 use crate::msgs::handshake::{
-    HandshakeMessagePayload, Random, ServerExtension, ServerHelloPayload, SessionId,
+    ECDHEServerKeyExchange, HandshakeMessagePayload, Random, ServerECDHParams, ServerExtension,
+    ServerHelloPayload, ServerKeyExchangePayload, SessionId,
 };
 use crate::server::common::ActiveCertifiedKey;
 use crate::server::{hs, ClientHello};
@@ -29,7 +32,9 @@ use crate::{
     AlertDescription, Error, HandshakeType, PeerIncompatible, PeerMisbehaved, ProtocolVersion,
     ServerConfig,
 };
-use crate::{suites, SupportedCipherSuite, Tls12CipherSuite};
+use crate::{
+    suites, DigitallySignedStruct, SignatureScheme, SupportedCipherSuite, Tls12CipherSuite,
+};
 
 /// FIXME: docs
 pub struct LlServerConnection {
@@ -273,6 +278,18 @@ impl ExpectState for ExpectClientHello {
                 PeerIncompatible::NoSignatureSchemesInCommon,
             ))));
         }
+        let Some(group) = common
+            .config
+            .kx_groups
+            .iter()
+            .find(|skxg| groups_ext.contains(&skxg.name()))
+            .cloned()
+        else {
+            return Ok(CommonState::Write(Box::new(WriteAlert::new(
+                AlertDescription::HandshakeFailure,
+                PeerIncompatible::NoKxGroupsInCommon,
+            ))));
+        };
 
         let Some(ecpoint) = ECPointFormat::SUPPORTED
             .iter()
@@ -329,6 +346,8 @@ impl ExpectState for ExpectClientHello {
             suite,
             extensions: ep.exts,
             certkey,
+            sigschemes,
+            selected_group: group,
         })))
     }
 }
@@ -340,6 +359,8 @@ struct WriteServerHello {
     suite: &'static Tls12CipherSuite,
     extensions: Vec<ServerExtension>,
     certkey: Arc<CertifiedKey>,
+    sigschemes: Vec<SignatureScheme>,
+    selected_group: &'static dyn SupportedKxGroup,
 }
 
 impl WriteState for WriteServerHello {
@@ -363,6 +384,7 @@ impl WriteState for WriteServerHello {
                 }),
             }),
         };
+        log_msg(&sh, false);
 
         self.transcript.add_message(&sh);
 
@@ -371,6 +393,9 @@ impl WriteState for WriteServerHello {
             CommonState::Send(Box::new(SendServerHello {
                 transcript: self.transcript,
                 certkey: self.certkey,
+                randoms: self.randoms,
+                sigschemes: self.sigschemes,
+                selected_group: self.selected_group,
             })),
         )
     }
@@ -379,6 +404,9 @@ impl WriteState for WriteServerHello {
 struct SendServerHello {
     transcript: HandshakeHash,
     certkey: Arc<CertifiedKey>,
+    sigschemes: Vec<SignatureScheme>,
+    randoms: ConnectionRandoms,
+    selected_group: &'static dyn SupportedKxGroup,
 }
 
 impl SendState for SendServerHello {
@@ -388,6 +416,9 @@ impl SendState for SendServerHello {
         CommonState::Write(Box::new(WriteCertificate {
             transcript: self.transcript,
             certkey: self.certkey,
+            randoms: self.randoms,
+            sigschemes: self.sigschemes,
+            selected_group: self.selected_group,
         }))
     }
 }
@@ -395,6 +426,9 @@ impl SendState for SendServerHello {
 struct WriteCertificate {
     transcript: HandshakeHash,
     certkey: Arc<CertifiedKey>,
+    sigschemes: Vec<SignatureScheme>,
+    randoms: ConnectionRandoms,
+    selected_group: &'static dyn SupportedKxGroup,
 }
 
 impl WriteState for WriteCertificate {
@@ -415,6 +449,7 @@ impl WriteState for WriteCertificate {
                 ),
             }),
         };
+        log_msg(&c, false);
 
         self.transcript.add_message(&c);
 
@@ -422,6 +457,10 @@ impl WriteState for WriteCertificate {
             c,
             CommonState::Send(Box::new(SendCertificate {
                 transcript: self.transcript,
+                certkey: self.certkey,
+                sigschemes: self.sigschemes,
+                randoms: self.randoms,
+                selected_group: self.selected_group,
             })),
         )
     }
@@ -429,29 +468,108 @@ impl WriteState for WriteCertificate {
 
 struct SendCertificate {
     transcript: HandshakeHash,
+    certkey: Arc<CertifiedKey>,
+    sigschemes: Vec<SignatureScheme>,
+    randoms: ConnectionRandoms,
+    selected_group: &'static dyn SupportedKxGroup,
 }
 
 impl SendState for SendCertificate {
     type Data = Arc<ServerConfig>;
 
     fn tls_data_done(self: Box<Self>) -> CommonState<Self::Data> {
-        CommonState::Write(Box::new(WriteServerKeyExchange {
+        CommonState::Intermediate(Box::new(PrepareKeyExchange {
             transcript: self.transcript,
+            certkey: self.certkey,
+            sigschemes: self.sigschemes,
+            randoms: self.randoms,
+            selected_group: self.selected_group,
         }))
+    }
+}
+
+struct PrepareKeyExchange {
+    transcript: HandshakeHash,
+    certkey: Arc<CertifiedKey>,
+    sigschemes: Vec<SignatureScheme>,
+    randoms: ConnectionRandoms,
+    selected_group: &'static dyn SupportedKxGroup,
+}
+
+impl IntermediateState for PrepareKeyExchange {
+    type Data = Arc<ServerConfig>;
+
+    fn next_state(
+        self: Box<Self>,
+        common: &mut LlConnectionCommon<Self::Data>,
+    ) -> Result<CommonState<Self::Data>, Error> {
+        let kx = self
+            .selected_group
+            .start()
+            .map_err(|_| Error::FailedToGetRandomBytes)?;
+        let secdh = ServerECDHParams::new(&*kx);
+
+        let mut msg = Vec::new();
+        msg.extend(self.randoms.client);
+        msg.extend(self.randoms.server);
+        secdh.encode(&mut msg);
+
+        let signer = ActiveCertifiedKey::from_certified_key(&self.certkey)
+            .get_key()
+            .choose_scheme(&self.sigschemes)
+            .ok_or_else(|| Error::General("incompatible signing key".to_owned()))?;
+        let sigscheme = signer.scheme();
+        let sig = signer.sign(&msg)?;
+
+        Ok(CommonState::Write(Box::new(WriteServerKeyExchange {
+            transcript: self.transcript,
+            sigscheme,
+            sig,
+            secdh,
+        })))
     }
 }
 
 struct WriteServerKeyExchange {
     transcript: HandshakeHash,
+    sigscheme: SignatureScheme,
+    sig: Vec<u8>,
+    secdh: ServerECDHParams,
 }
 
 impl WriteState for WriteServerKeyExchange {
     type Data = Arc<ServerConfig>;
 
     fn generate_message(
-        self: Box<Self>,
-        conn: &mut LlConnectionCommon<Self::Data>,
+        mut self: Box<Self>,
+        _conn: &mut LlConnectionCommon<Self::Data>,
     ) -> GeneratedMessage<Self::Data> {
+        let skx = ServerKeyExchangePayload::ECDHE(ECDHEServerKeyExchange {
+            params: self.secdh,
+            dss: DigitallySignedStruct::new(self.sigscheme, self.sig),
+        });
+
+        let m = Message {
+            version: ProtocolVersion::TLSv1_2,
+            payload: MessagePayload::handshake(HandshakeMessagePayload {
+                typ: HandshakeType::ServerKeyExchange,
+                payload: HandshakePayload::ServerKeyExchange(skx),
+            }),
+        };
+        log_msg(&m, false);
+
+        self.transcript.add_message(&m);
+
+        GeneratedMessage::new(m, CommonState::Send(Box::new(SendServerKeyExchange {})))
+    }
+}
+
+struct SendServerKeyExchange {}
+
+impl SendState for SendServerKeyExchange {
+    type Data = Arc<ServerConfig>;
+
+    fn tls_data_done(self: Box<Self>) -> CommonState<Self::Data> {
         todo!()
     }
 }
