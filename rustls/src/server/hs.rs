@@ -65,15 +65,18 @@ impl ExtensionProcessing {
         Default::default()
     }
 
-    pub(super) fn process_common(
+    pub(super) fn process_common_aux(
         &mut self,
         config: &ServerConfig,
-        cx: &mut ServerContext<'_>,
+        alpn_protocol: &mut Option<Vec<u8>>,
+        #[cfg(feature = "quic")] is_quic: bool,
+        #[cfg(feature = "quic")] quic: &mut crate::quic::Quic,
+        is_tls13: bool,
         ocsp_response: &mut Option<&[u8]>,
         hello: &ClientHelloPayload,
         resumedata: Option<&persist::ServerSessionValue>,
         extra_exts: Vec<ServerExtension>,
-    ) -> Result<(), Error> {
+    ) -> Result<(), (Option<AlertDescription>, Error)> {
         // ALPN
         let our_protocols = &config.alpn_protocols;
         let maybe_their_protocols = hello.get_alpn_extension();
@@ -84,20 +87,20 @@ impl ExtensionProcessing {
                 .iter()
                 .any(|protocol| protocol.is_empty())
             {
-                return Err(PeerMisbehaved::OfferedEmptyApplicationProtocol.into());
+                return Err((None, PeerMisbehaved::OfferedEmptyApplicationProtocol.into()));
             }
 
-            cx.common.alpn_protocol = our_protocols
+            *alpn_protocol = our_protocols
                 .iter()
                 .find(|protocol| their_protocols.contains(&protocol.as_slice()))
                 .cloned();
-            if let Some(ref selected_protocol) = cx.common.alpn_protocol {
+            if let Some(ref selected_protocol) = alpn_protocol {
                 debug!("Chosen ALPN protocol {:?}", selected_protocol);
                 self.exts
                     .push(ServerExtension::make_alpn(&[selected_protocol]));
             } else if !our_protocols.is_empty() {
-                return Err(cx.common.send_fatal_alert(
-                    AlertDescription::NoApplicationProtocol,
+                return Err((
+                    Some(AlertDescription::NoApplicationProtocol),
                     Error::NoApplicationProtocol,
                 ));
             }
@@ -105,7 +108,7 @@ impl ExtensionProcessing {
 
         #[cfg(feature = "quic")]
         {
-            if cx.common.is_quic() {
+            if is_quic {
                 // QUIC has strict ALPN, unlike TLS's more backwards-compatible behavior. RFC 9001
                 // says: "The server MUST treat the inability to select a compatible application
                 // protocol as a connection error of type 0x0178". We judge that ALPN was desired
@@ -113,21 +116,22 @@ impl ExtensionProcessing {
                 // protocols were configured locally or offered by the client. This helps prevent
                 // successful establishment of connections between peers that can't understand
                 // each other.
-                if cx.common.alpn_protocol.is_none()
+                if alpn_protocol.is_none()
                     && (!our_protocols.is_empty() || maybe_their_protocols.is_some())
                 {
-                    return Err(cx.common.send_fatal_alert(
-                        AlertDescription::NoApplicationProtocol,
+                    return Err((
+                        Some(AlertDescription::NoApplicationProtocol),
                         Error::NoApplicationProtocol,
                     ));
                 }
 
                 match hello.get_quic_params_extension() {
-                    Some(params) => cx.common.quic.params = Some(params),
+                    Some(params) => quic.params = Some(params),
                     None => {
-                        return Err(cx
-                            .common
-                            .missing_extension(PeerMisbehaved::MissingQuicTransportParameters));
+                        return Err((
+                            Some(AlertDescription::MissingExtension),
+                            PeerMisbehaved::MissingQuicTransportParameters.into(),
+                        ));
                     }
                 }
             }
@@ -148,7 +152,7 @@ impl ExtensionProcessing {
                 .find_extension(ExtensionType::StatusRequest)
                 .is_some()
         {
-            if ocsp_response.is_some() && !cx.common.is_tls13() {
+            if ocsp_response.is_some() && !is_tls13 {
                 // Only TLS1.2 sends confirmation in ServerHello
                 self.exts
                     .push(ServerExtension::CertificateStatusAck);
@@ -161,6 +165,42 @@ impl ExtensionProcessing {
         self.exts.extend(extra_exts);
 
         Ok(())
+    }
+
+    pub(super) fn process_common(
+        &mut self,
+        config: &ServerConfig,
+        cx: &mut ServerContext<'_>,
+        ocsp_response: &mut Option<&[u8]>,
+        hello: &ClientHelloPayload,
+        resumedata: Option<&persist::ServerSessionValue>,
+        extra_exts: Vec<ServerExtension>,
+    ) -> Result<(), Error> {
+        #[cfg(feature = "quic")]
+        let is_quic = cx.common.is_quic();
+
+        let is_tls13 = cx.common.is_tls13();
+
+        self.process_common_aux(
+            config,
+            &mut cx.common.alpn_protocol,
+            #[cfg(feature = "quic")]
+            is_quic,
+            #[cfg(feature = "quic")]
+            &mut cx.common.quic,
+            is_tls13,
+            ocsp_response,
+            hello,
+            resumedata,
+            extra_exts,
+        )
+        .map_err(|(opt_desc, err)| {
+            if let Some(desc) = opt_desc {
+                cx.common.send_fatal_alert(desc, err)
+            } else {
+                err
+            }
+        })
     }
 
     #[cfg(feature = "tls12")]

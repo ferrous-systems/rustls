@@ -5,16 +5,20 @@ use core::ops::{Deref, DerefMut};
 use alloc::borrow::ToOwned;
 use alloc::boxed::Box;
 use alloc::sync::Arc;
+use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::conn::ConnectionRandoms;
 use crate::dns_name::DnsName;
 use crate::hash_hs::{HandshakeHash, HandshakeHashBuffer};
-use crate::low_level::{GeneratedMessage, WriteState};
+use crate::low_level::{GeneratedMessage, SendState, WriteState};
 use crate::msgs::enums::ECPointFormat;
-use crate::msgs::handshake::{Random, SessionId};
+use crate::msgs::handshake::{
+    HandshakeMessagePayload, Random, ServerExtension, ServerHelloPayload, SessionId,
+};
 use crate::server::common::ActiveCertifiedKey;
-use crate::server::ClientHello;
+use crate::server::{hs, ClientHello};
+use crate::sign::CertifiedKey;
 use crate::{
     low_level::{CommonState, ExpectState, LlConnectionCommon, WriteAlert},
     msgs::{
@@ -25,7 +29,7 @@ use crate::{
     AlertDescription, Error, HandshakeType, PeerIncompatible, PeerMisbehaved, ProtocolVersion,
     ServerConfig,
 };
-use crate::{suites, SupportedCipherSuite};
+use crate::{suites, SupportedCipherSuite, Tls12CipherSuite};
 
 /// FIXME: docs
 pub struct LlServerConnection {
@@ -190,13 +194,13 @@ impl ExpectState for ExpectClientHello {
             certkey
         };
 
-        let certkey = ActiveCertifiedKey::from_certified_key(&certkey);
+        let active_certkey = ActiveCertifiedKey::from_certified_key(&certkey);
 
         // Reduce our supported ciphersuites by the certificate.
         // (no-op for TLS1.3)
         let suitable_suites = suites::reduce_given_sigalg(
             &common.config.cipher_suites,
-            certkey.get_key().algorithm(),
+            active_certkey.get_key().algorithm(),
         );
 
         // And version
@@ -294,12 +298,37 @@ impl ExpectState for ExpectClientHello {
             SessionId::random(common.config.provider)?
         };
 
+        let mut ocsp_response = active_certkey.get_ocsp();
+
+        let mut ep = hs::ExtensionProcessing::new();
+        let mut alpn_protocol = None;
+        if let Err((opt_desc, err)) = ep.process_common_aux(
+            &common.config,
+            &mut alpn_protocol,
+            #[cfg(feature = "quic")]
+            false,
+            #[cfg(feature = "quic")]
+            &mut crate::quic::Quic::default(),
+            false,
+            &mut ocsp_response,
+            client_hello,
+            None,
+            vec![],
+        ) {
+            return match opt_desc {
+                Some(desc) => Ok(CommonState::Write(Box::new(WriteAlert::new(desc, err)))),
+                None => Err(err),
+            };
+        }
+        ep.process_tls12(&common.config, client_hello, using_ems);
+
         Ok(CommonState::Write(Box::new(WriteServerHello {
             session_id,
             transcript,
             randoms,
-            sni,
-            using_ems,
+            suite,
+            extensions: ep.exts,
+            certkey,
         })))
     }
 }
@@ -308,16 +337,120 @@ struct WriteServerHello {
     session_id: SessionId,
     transcript: HandshakeHash,
     randoms: ConnectionRandoms,
-    sni: Option<DnsName>,
-    using_ems: bool,
+    suite: &'static Tls12CipherSuite,
+    extensions: Vec<ServerExtension>,
+    certkey: Arc<CertifiedKey>,
 }
 
 impl WriteState for WriteServerHello {
     type Data = Arc<ServerConfig>;
 
     fn generate_message(
-        self: Box<Self>,
+        mut self: Box<Self>,
         _conn: &mut LlConnectionCommon<Self::Data>,
+    ) -> GeneratedMessage<Self::Data> {
+        let sh = Message {
+            version: ProtocolVersion::TLSv1_2,
+            payload: MessagePayload::handshake(HandshakeMessagePayload {
+                typ: HandshakeType::ServerHello,
+                payload: HandshakePayload::ServerHello(ServerHelloPayload {
+                    legacy_version: ProtocolVersion::TLSv1_2,
+                    random: Random::from(self.randoms.server),
+                    session_id: self.session_id,
+                    cipher_suite: self.suite.common.suite,
+                    compression_method: Compression::Null,
+                    extensions: self.extensions,
+                }),
+            }),
+        };
+
+        self.transcript.add_message(&sh);
+
+        GeneratedMessage::new(
+            sh,
+            CommonState::Send(Box::new(SendServerHello {
+                transcript: self.transcript,
+                certkey: self.certkey,
+            })),
+        )
+    }
+}
+
+struct SendServerHello {
+    transcript: HandshakeHash,
+    certkey: Arc<CertifiedKey>,
+}
+
+impl SendState for SendServerHello {
+    type Data = Arc<ServerConfig>;
+
+    fn tls_data_done(self: Box<Self>) -> CommonState<Self::Data> {
+        CommonState::Write(Box::new(WriteCertificate {
+            transcript: self.transcript,
+            certkey: self.certkey,
+        }))
+    }
+}
+
+struct WriteCertificate {
+    transcript: HandshakeHash,
+    certkey: Arc<CertifiedKey>,
+}
+
+impl WriteState for WriteCertificate {
+    type Data = Arc<ServerConfig>;
+
+    fn generate_message(
+        mut self: Box<Self>,
+        conn: &mut LlConnectionCommon<Self::Data>,
+    ) -> GeneratedMessage<Self::Data> {
+        let c = Message {
+            version: ProtocolVersion::TLSv1_2,
+            payload: MessagePayload::handshake(HandshakeMessagePayload {
+                typ: HandshakeType::Certificate,
+                payload: HandshakePayload::Certificate(
+                    ActiveCertifiedKey::from_certified_key(self.certkey.as_ref())
+                        .get_cert()
+                        .to_owned(),
+                ),
+            }),
+        };
+
+        self.transcript.add_message(&c);
+
+        GeneratedMessage::new(
+            c,
+            CommonState::Send(Box::new(SendCertificate {
+                transcript: self.transcript,
+            })),
+        )
+    }
+}
+
+struct SendCertificate {
+    transcript: HandshakeHash,
+}
+
+impl SendState for SendCertificate {
+    type Data = Arc<ServerConfig>;
+
+    fn tls_data_done(self: Box<Self>) -> CommonState<Self::Data> {
+        CommonState::Write(Box::new(WriteServerKeyExchange {
+            transcript: self.transcript,
+        }))
+    }
+}
+
+struct WriteServerKeyExchange {
+    transcript: HandshakeHash,
+}
+
+impl WriteState for WriteServerKeyExchange {
+    type Data = Arc<ServerConfig>;
+
+    fn generate_message(
+        self: Box<Self>,
+        conn: &mut LlConnectionCommon<Self::Data>,
     ) -> GeneratedMessage<Self::Data> {
         todo!()
     }
