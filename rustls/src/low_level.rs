@@ -73,7 +73,7 @@ pub(crate) trait ExpectState: Send + 'static {
 }
 
 pub(crate) trait EmitState: Send + 'static {
-    fn generate_message(self: Box<Self>, conn: &mut LlConnectionCommon) -> GeneratedMessage;
+    fn generate_message(self: Box<Self>) -> GeneratedMessage;
 }
 
 pub(crate) struct WriteAlert {
@@ -91,7 +91,7 @@ impl WriteAlert {
 }
 
 impl EmitState for WriteAlert {
-    fn generate_message(self: Box<Self>, _conn: &mut LlConnectionCommon) -> GeneratedMessage {
+    fn generate_message(self: Box<Self>) -> GeneratedMessage {
         GeneratedMessage::new(
             Message::build_alert(AlertLevel::Fatal, self.description),
             CommonState::AfterEmit(Box::new(CommonState::Poisoned(self.error))),
@@ -107,7 +107,7 @@ pub(crate) struct RetryWrite {
 }
 
 impl EmitState for RetryWrite {
-    fn generate_message(self: Box<Self>, _conn: &mut LlConnectionCommon) -> GeneratedMessage {
+    fn generate_message(self: Box<Self>) -> GeneratedMessage {
         GeneratedMessage::new(self.plain_msg, *self.next_state)
             .skip(self.index)
             .require_encryption(self.needs_encryption)
@@ -282,7 +282,7 @@ impl LlConnectionCommon {
             skip_index,
             next_state,
         } = match self.state.take() {
-            CommonState::Emit(state) => state.generate_message(self),
+            CommonState::Emit(state) => state.generate_message(),
             _ => unreachable!(),
         };
 

@@ -71,7 +71,7 @@ pub(crate) struct WriteClientHello {
 }
 
 impl EmitState for WriteClientHello {
-    fn generate_message(self: Box<Self>, _common: &mut LlConnectionCommon) -> GeneratedMessage {
+    fn generate_message(self: Box<Self>) -> GeneratedMessage {
         let support_tls12 = self
             .config
             .supports_version(ProtocolVersion::TLSv1_2);
@@ -369,7 +369,7 @@ pub(crate) struct WriteClientKeyExchange {
     transcript: HandshakeHash,
 }
 impl EmitState for WriteClientKeyExchange {
-    fn generate_message(mut self: Box<Self>, _common: &mut LlConnectionCommon) -> GeneratedMessage {
+    fn generate_message(mut self: Box<Self>) -> GeneratedMessage {
         let mut buf = Vec::new();
         let ecpoint = PayloadU8::new(Vec::from(self.kx.pub_key()));
         ecpoint.encode(&mut buf);
@@ -442,7 +442,7 @@ pub(crate) struct WriteChangeCipherSpec {
     transcript: HandshakeHash,
 }
 impl EmitState for WriteChangeCipherSpec {
-    fn generate_message(self: Box<Self>, _common: &mut LlConnectionCommon) -> GeneratedMessage {
+    fn generate_message(self: Box<Self>) -> GeneratedMessage {
         let msg = Message {
             version: ProtocolVersion::TLSv1_2,
             payload: MessagePayload::ChangeCipherSpec(ChangeCipherSpecPayload {}),
@@ -464,7 +464,7 @@ pub(crate) struct WriteFinished {
     transcript: HandshakeHash,
 }
 impl EmitState for WriteFinished {
-    fn generate_message(mut self: Box<Self>, _common: &mut LlConnectionCommon) -> GeneratedMessage {
+    fn generate_message(mut self: Box<Self>) -> GeneratedMessage {
         let vh = self.transcript.get_current_hash();
         let verify_data = self.secrets.client_verify_data(&vh);
         let verify_data_payload = Payload::new(verify_data);

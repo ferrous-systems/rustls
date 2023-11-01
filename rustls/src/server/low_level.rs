@@ -351,7 +351,7 @@ struct WriteServerHello {
 }
 
 impl EmitState for WriteServerHello {
-    fn generate_message(mut self: Box<Self>, _conn: &mut LlConnectionCommon) -> GeneratedMessage {
+    fn generate_message(mut self: Box<Self>) -> GeneratedMessage {
         let sh = Message {
             version: ProtocolVersion::TLSv1_2,
             payload: MessagePayload::handshake(HandshakeMessagePayload {
@@ -392,7 +392,7 @@ struct WriteCertificate {
 }
 
 impl EmitState for WriteCertificate {
-    fn generate_message(mut self: Box<Self>, _conn: &mut LlConnectionCommon) -> GeneratedMessage {
+    fn generate_message(mut self: Box<Self>) -> GeneratedMessage {
         let c = Message {
             version: ProtocolVersion::TLSv1_2,
             payload: MessagePayload::handshake(HandshakeMessagePayload {
@@ -468,7 +468,7 @@ struct WriteServerKeyExchange {
 }
 
 impl EmitState for WriteServerKeyExchange {
-    fn generate_message(mut self: Box<Self>, _conn: &mut LlConnectionCommon) -> GeneratedMessage {
+    fn generate_message(mut self: Box<Self>) -> GeneratedMessage {
         let skx = ServerKeyExchangePayload::ECDHE(ECDHEServerKeyExchange {
             params: self.secdh,
             dss: DigitallySignedStruct::new(self.sigscheme, self.sig),
