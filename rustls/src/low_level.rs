@@ -169,11 +169,15 @@ impl LlConnectionCommon {
                 CommonState::Poisoned(err) => {
                     return Err(err);
                 }
-                state @ CommonState::Emit(_) => {
-                    self.state = state;
+                CommonState::Emit(state) => {
+                    let generated_message = state.generate_message();
+
                     return Ok(Status {
                         discard: core::mem::take(&mut self.offset),
-                        state: State::MustEncryptTlsData(MustEncryptTlsData { conn: self }),
+                        state: State::MustEncryptTlsData(MustEncryptTlsData {
+                            conn: self,
+                            generated_message,
+                        }),
                     });
                 }
                 CommonState::AfterEmit(next_state) => {
@@ -261,60 +265,6 @@ impl LlConnectionCommon {
                 }
             }
         }
-    }
-
-    fn encrypt_tls_data(&mut self, outgoing_tls: &mut [u8]) -> Result<usize, EncryptError> {
-        let message_fragmenter = MessageFragmenter::default();
-        let GeneratedMessage {
-            plain_msg,
-            needs_encryption,
-            skip_index,
-            next_state,
-        } = match self.state.take() {
-            CommonState::Emit(state) => state.generate_message(),
-            _ => unreachable!(),
-        };
-
-        let mut written_bytes = 0;
-
-        let mut iter = message_fragmenter
-            .fragment_message(&plain_msg)
-            .enumerate()
-            .skip(skip_index);
-
-        while let Some((index, m)) = iter.next() {
-            let opaque_msg = if needs_encryption {
-                self.record_layer.encrypt_outgoing(m)
-            } else {
-                m.to_unencrypted_opaque()
-            };
-
-            let bytes = opaque_msg.encode();
-
-            if bytes.len() > outgoing_tls.len() {
-                let required_size = bytes.len();
-
-                drop(iter);
-
-                self.state = CommonState::Emit(Box::new(RetryEmit {
-                    plain_msg,
-                    index,
-                    needs_encryption,
-                    next_state: Box::new(next_state),
-                }));
-
-                return Err(EncryptError::InsufficientSize(InsufficientSizeError {
-                    required_size,
-                }));
-            }
-
-            outgoing_tls[written_bytes..written_bytes + bytes.len()].copy_from_slice(&bytes);
-            written_bytes += bytes.len();
-        }
-
-        self.state = next_state;
-
-        Ok(written_bytes)
     }
 
     fn encrypt_traffic_transit(
@@ -530,6 +480,7 @@ pub struct InsufficientSizeError {
 pub struct MustEncryptTlsData<'c> {
     /// FIXME: docs
     conn: &'c mut LlConnectionCommon,
+    generated_message: GeneratedMessage,
 }
 
 /// An error occurred while encrypting a handshake record
@@ -565,7 +516,49 @@ impl<'c> MustEncryptTlsData<'c> {
     /// returns the number of bytes that were written into `outgoing_tls`, or an error if
     /// the provided buffer was too small. in the error case, `outgoing_tls` is not modified
     pub fn encrypt(&mut self, outgoing_tls: &mut [u8]) -> Result<usize, EncryptError> {
-        self.conn.encrypt_tls_data(outgoing_tls)
+        let message_fragmenter = MessageFragmenter::default();
+        let GeneratedMessage {
+            ref plain_msg,
+            needs_encryption,
+            skip_index,
+            ref mut next_state,
+        } = self.generated_message;
+
+        let mut written_bytes = 0;
+
+        let mut iter = message_fragmenter
+            .fragment_message(plain_msg)
+            .enumerate()
+            .skip(skip_index);
+
+        while let Some((index, m)) = iter.next() {
+            let opaque_msg = if needs_encryption {
+                self.conn
+                    .record_layer
+                    .encrypt_outgoing(m)
+            } else {
+                m.to_unencrypted_opaque()
+            };
+
+            let bytes = opaque_msg.encode();
+
+            if bytes.len() > outgoing_tls.len() {
+                let required_size = bytes.len();
+
+                self.generated_message.skip_index = index;
+
+                return Err(EncryptError::InsufficientSize(InsufficientSizeError {
+                    required_size,
+                }));
+            }
+
+            outgoing_tls[written_bytes..written_bytes + bytes.len()].copy_from_slice(&bytes);
+            written_bytes += bytes.len();
+        }
+
+        self.conn.state = next_state.take();
+
+        Ok(written_bytes)
     }
 }
 
