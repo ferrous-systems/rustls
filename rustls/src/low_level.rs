@@ -185,13 +185,6 @@ impl LlConnectionCommon {
                         }),
                     });
                 }
-                state @ CommonState::Expect(_) if incoming_tls.is_empty() => {
-                    self.state = state;
-                    return Ok(Status {
-                        discard: core::mem::take(&mut self.offset),
-                        state: State::NeedsMoreTlsData { num_bytes: None },
-                    });
-                }
                 CommonState::Expect(mut curr_state) => {
                     let transcript = curr_state.get_transcript_mut();
                     let message = match self.read_message(incoming_tls, transcript) {
