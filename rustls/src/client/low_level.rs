@@ -12,8 +12,8 @@ use crate::conn::ConnectionRandoms;
 use crate::crypto::ActiveKeyExchange;
 use crate::hash_hs::{HandshakeHash, HandshakeHashBuffer};
 use crate::low_level::{
-    log_msg, CommonState, EmitState, ExpectState, GeneratedMessage, IntermediateState,
-    LlConnectionCommon, WriteAlert,
+    log_msg, CommonState, EmitAlert, EmitState, ExpectState, GeneratedMessage, IntermediateState,
+    LlConnectionCommon,
 };
 use crate::msgs::base::{Payload, PayloadU8};
 use crate::msgs::ccs::ChangeCipherSpecPayload;
@@ -55,7 +55,7 @@ impl LlClientConnection {
         let random = Random::new(config.provider)?;
 
         Ok(Self {
-            conn: LlConnectionCommon::new(CommonState::Emit(Box::new(WriteClientHello {
+            conn: LlConnectionCommon::new(CommonState::Emit(Box::new(EmitClientHello {
                 config,
                 name,
                 random,
@@ -64,13 +64,13 @@ impl LlClientConnection {
     }
 }
 
-pub(crate) struct WriteClientHello {
+pub(crate) struct EmitClientHello {
     config: Arc<ClientConfig>,
     name: ServerName,
     random: Random,
 }
 
-impl EmitState for WriteClientHello {
+impl EmitState for EmitClientHello {
     fn generate_message(self: Box<Self>) -> GeneratedMessage {
         let support_tls12 = self
             .config
@@ -174,7 +174,7 @@ impl ExpectState for ExpectServerHello {
                 transcript,
             })))
         } else {
-            Ok(CommonState::Emit(Box::new(WriteAlert::new(
+            Ok(CommonState::Emit(Box::new(EmitAlert::new(
                 AlertDescription::HandshakeFailure,
                 PeerMisbehaved::SelectedUnofferedCipherSuite,
             ))))
@@ -205,7 +205,7 @@ impl ExpectState for ExpectCertificate {
             &[],
             UnixTime::now(),
         ) {
-            Ok(CommonState::Emit(Box::new(WriteAlert::new(
+            Ok(CommonState::Emit(Box::new(EmitAlert::new(
                 match &error {
                     Error::InvalidCertificate(e) => e.clone().into(),
                     Error::PeerMisbehaved(_) => AlertDescription::IllegalParameter,
@@ -294,7 +294,7 @@ impl ExpectState for ExpectServerHelloDone {
                     let ecdh_params = ServerEcdhParams::read(&mut rd)?;
 
                     if rd.any_left() {
-                        return Ok(CommonState::Emit(Box::new(WriteAlert::new(
+                        return Ok(CommonState::Emit(Box::new(EmitAlert::new(
                             AlertDescription::DecodeError,
                             InvalidMessage::InvalidDhParams,
                         ))));
@@ -308,7 +308,7 @@ impl ExpectState for ExpectServerHelloDone {
                             .start()
                             .map_err(|_| Error::FailedToGetRandomBytes)?;
 
-                        Ok(CommonState::Emit(Box::new(WriteClientKeyExchange {
+                        Ok(CommonState::Emit(Box::new(EmitClientKeyExchange {
                             suite: self.suite,
                             kx,
                             ecdh_params,
@@ -316,13 +316,13 @@ impl ExpectState for ExpectServerHelloDone {
                             transcript: self.transcript,
                         })))
                     } else {
-                        Ok(CommonState::Emit(Box::new(WriteAlert::new(
+                        Ok(CommonState::Emit(Box::new(EmitAlert::new(
                             AlertDescription::IllegalParameter,
                             PeerMisbehaved::IllegalHelloRetryRequestWithUnofferedNamedGroup,
                         ))))
                     }
                 }
-                None => Ok(CommonState::Emit(Box::new(WriteAlert::new(
+                None => Ok(CommonState::Emit(Box::new(EmitAlert::new(
                     AlertDescription::DecodeError,
                     InvalidMessage::MissingKeyExchange,
                 )))),
@@ -345,14 +345,14 @@ impl ExpectState for ExpectServerHelloDone {
     }
 }
 
-pub(crate) struct WriteClientKeyExchange {
+pub(crate) struct EmitClientKeyExchange {
     suite: &'static Tls12CipherSuite,
     kx: Box<dyn ActiveKeyExchange>,
     ecdh_params: ServerEcdhParams,
     randoms: ConnectionRandoms,
     transcript: HandshakeHash,
 }
-impl EmitState for WriteClientKeyExchange {
+impl EmitState for EmitClientKeyExchange {
     fn generate_message(mut self: Box<Self>) -> GeneratedMessage {
         let mut buf = Vec::new();
         let ecpoint = PayloadU8::new(Vec::from(self.kx.pub_key()));
@@ -411,7 +411,7 @@ impl IntermediateState for SetupClientEncryption {
         common.record_layer.start_encrypting();
 
         Ok(CommonState::AfterEmit(Box::new(CommonState::Emit(
-            Box::new(WriteChangeCipherSpec {
+            Box::new(EmitChangeCipherSpec {
                 secrets,
                 transcript: self.transcript,
             }),
@@ -419,11 +419,11 @@ impl IntermediateState for SetupClientEncryption {
     }
 }
 
-pub(crate) struct WriteChangeCipherSpec {
+pub(crate) struct EmitChangeCipherSpec {
     secrets: ConnectionSecrets,
     transcript: HandshakeHash,
 }
-impl EmitState for WriteChangeCipherSpec {
+impl EmitState for EmitChangeCipherSpec {
     fn generate_message(self: Box<Self>) -> GeneratedMessage {
         let msg = Message {
             version: ProtocolVersion::TLSv1_2,
@@ -432,7 +432,7 @@ impl EmitState for WriteChangeCipherSpec {
         log_msg(&msg, false);
 
         let next_state =
-            CommonState::AfterEmit(Box::new(CommonState::Emit(Box::new(WriteFinished {
+            CommonState::AfterEmit(Box::new(CommonState::Emit(Box::new(EmitFinished {
                 secrets: self.secrets,
                 transcript: self.transcript,
             }))));
@@ -441,11 +441,11 @@ impl EmitState for WriteChangeCipherSpec {
     }
 }
 
-pub(crate) struct WriteFinished {
+pub(crate) struct EmitFinished {
     secrets: ConnectionSecrets,
     transcript: HandshakeHash,
 }
-impl EmitState for WriteFinished {
+impl EmitState for EmitFinished {
     fn generate_message(mut self: Box<Self>) -> GeneratedMessage {
         let vh = self.transcript.get_current_hash();
         let verify_data = self.secrets.client_verify_data(&vh);

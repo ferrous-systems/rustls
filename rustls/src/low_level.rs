@@ -22,7 +22,7 @@ use crate::{
 use crate::{AlertDescription, ContentType, InvalidMessage};
 
 pub(crate) fn log_msg(msg: &Message, read: bool) {
-    let verb = if read { "Read" } else { "Write" };
+    let verb = if read { "Read" } else { "Emit" };
     match &msg.payload {
         MessagePayload::Handshake {
             parsed: HandshakeMessagePayload { typ, .. },
@@ -72,12 +72,12 @@ pub(crate) trait EmitState: Send + 'static {
     fn generate_message(self: Box<Self>) -> GeneratedMessage;
 }
 
-pub(crate) struct WriteAlert {
+pub(crate) struct EmitAlert {
     description: AlertDescription,
     error: Error,
 }
 
-impl WriteAlert {
+impl EmitAlert {
     pub(crate) fn new(description: AlertDescription, error: impl Into<Error>) -> Self {
         Self {
             description,
@@ -86,7 +86,7 @@ impl WriteAlert {
     }
 }
 
-impl EmitState for WriteAlert {
+impl EmitState for EmitAlert {
     fn generate_message(self: Box<Self>) -> GeneratedMessage {
         GeneratedMessage::new(
             Message::build_alert(AlertLevel::Fatal, self.description),
@@ -95,14 +95,14 @@ impl EmitState for WriteAlert {
     }
 }
 
-pub(crate) struct RetryWrite {
+pub(crate) struct RetryEmit {
     plain_msg: PlainMessage,
     index: usize,
     needs_encryption: bool,
     next_state: Box<CommonState>,
 }
 
-impl EmitState for RetryWrite {
+impl EmitState for RetryEmit {
     fn generate_message(self: Box<Self>) -> GeneratedMessage {
         GeneratedMessage::new(self.plain_msg, *self.next_state)
             .skip(self.index)
@@ -303,7 +303,7 @@ impl LlConnectionCommon {
 
                 drop(iter);
 
-                self.state = CommonState::Emit(Box::new(RetryWrite {
+                self.state = CommonState::Emit(Box::new(RetryEmit {
                     plain_msg,
                     index,
                     needs_encryption,
@@ -382,7 +382,7 @@ impl LlConnectionCommon {
         curr_state: CommonState,
     ) -> Result<(), Error> {
         self.state = if let AlertLevel::Unknown(_) = alert.level {
-            CommonState::Emit(Box::new(WriteAlert::new(
+            CommonState::Emit(Box::new(EmitAlert::new(
                 AlertDescription::IllegalParameter,
                 Error::AlertReceived(alert.description),
             )))
