@@ -12,8 +12,8 @@ use crate::conn::ConnectionRandoms;
 use crate::crypto::ActiveKeyExchange;
 use crate::hash_hs::{HandshakeHash, HandshakeHashBuffer};
 use crate::low_level::{
-    log_msg, CommonState, ExpectState, GeneratedMessage, IntermediateState, LlConnectionCommon,
-    WriteAlert, WriteState,
+    log_msg, CommonState, EmitState, ExpectState, GeneratedMessage, IntermediateState,
+    LlConnectionCommon, WriteAlert,
 };
 use crate::msgs::base::{Payload, PayloadU8};
 use crate::msgs::ccs::ChangeCipherSpecPayload;
@@ -52,7 +52,7 @@ impl DerefMut for LlClientConnection {
 impl LlClientConnection {
     /// FIXME: docs
     pub fn new(config: Arc<ClientConfig>, name: ServerName) -> Result<Self, Error> {
-        let state = CommonState::Write(Box::new(WriteClientHello::new(config.as_ref(), name)?));
+        let state = CommonState::Emit(Box::new(WriteClientHello::new(config.as_ref(), name)?));
 
         Ok(Self {
             conn: LlConnectionCommon::new(config, state)?,
@@ -74,7 +74,7 @@ impl WriteClientHello {
     }
 }
 
-impl WriteState for WriteClientHello {
+impl EmitState for WriteClientHello {
     type Data = Arc<ClientConfig>;
 
     fn generate_message(
@@ -137,7 +137,7 @@ impl WriteState for WriteClientHello {
         let mut transcript_buffer = HandshakeHashBuffer::new();
         transcript_buffer.add_message(&msg);
         let next_state =
-            CommonState::AfterWrite(Box::new(CommonState::Expect(Box::new(ExpectServerHello {
+            CommonState::AfterEmit(Box::new(CommonState::Expect(Box::new(ExpectServerHello {
                 name: self.name,
                 transcript_buffer,
                 random: self.random,
@@ -188,7 +188,7 @@ impl ExpectState for ExpectServerHello {
                 transcript,
             })))
         } else {
-            Ok(CommonState::Write(Box::new(WriteAlert::new(
+            Ok(CommonState::Emit(Box::new(WriteAlert::new(
                 AlertDescription::HandshakeFailure,
                 PeerMisbehaved::SelectedUnofferedCipherSuite,
             ))))
@@ -222,7 +222,7 @@ impl ExpectState for ExpectCertificate {
             .verifier
             .verify_server_cert(&payload[0], &[], &self.name, &[], UnixTime::now())
         {
-            Ok(CommonState::Write(Box::new(WriteAlert::new(
+            Ok(CommonState::Emit(Box::new(WriteAlert::new(
                 match &error {
                     Error::InvalidCertificate(e) => e.clone().into(),
                     Error::PeerMisbehaved(_) => AlertDescription::IllegalParameter,
@@ -319,7 +319,7 @@ impl ExpectState for ExpectServerHelloDone {
                     let ecdh_params = ServerEcdhParams::read(&mut rd)?;
 
                     if rd.any_left() {
-                        return Ok(CommonState::Write(Box::new(WriteAlert::new(
+                        return Ok(CommonState::Emit(Box::new(WriteAlert::new(
                             AlertDescription::DecodeError,
                             InvalidMessage::InvalidDhParams,
                         ))));
@@ -333,7 +333,7 @@ impl ExpectState for ExpectServerHelloDone {
                             .start()
                             .map_err(|_| Error::FailedToGetRandomBytes)?;
 
-                        Ok(CommonState::Write(Box::new(WriteClientKeyExchange {
+                        Ok(CommonState::Emit(Box::new(WriteClientKeyExchange {
                             suite: self.suite,
                             kx,
                             ecdh_params,
@@ -341,13 +341,13 @@ impl ExpectState for ExpectServerHelloDone {
                             transcript: self.transcript,
                         })))
                     } else {
-                        Ok(CommonState::Write(Box::new(WriteAlert::new(
+                        Ok(CommonState::Emit(Box::new(WriteAlert::new(
                             AlertDescription::IllegalParameter,
                             PeerMisbehaved::IllegalHelloRetryRequestWithUnofferedNamedGroup,
                         ))))
                     }
                 }
-                None => Ok(CommonState::Write(Box::new(WriteAlert::new(
+                None => Ok(CommonState::Emit(Box::new(WriteAlert::new(
                     AlertDescription::DecodeError,
                     InvalidMessage::MissingKeyExchange,
                 )))),
@@ -377,7 +377,7 @@ pub(crate) struct WriteClientKeyExchange {
     randoms: ConnectionRandoms,
     transcript: HandshakeHash,
 }
-impl WriteState for WriteClientKeyExchange {
+impl EmitState for WriteClientKeyExchange {
     type Data = Arc<ClientConfig>;
     fn generate_message(
         mut self: Box<Self>,
@@ -445,7 +445,7 @@ impl IntermediateState for SetupClientEncryption {
                 .prepare_message_decrypter(dec);
             common.record_layer.start_encrypting();
 
-            Ok(CommonState::AfterWrite(Box::new(CommonState::Write(
+            Ok(CommonState::AfterEmit(Box::new(CommonState::Emit(
                 Box::new(WriteChangeCipherSpec {
                     secrets,
                     transcript: self.transcript,
@@ -459,7 +459,7 @@ pub(crate) struct WriteChangeCipherSpec {
     secrets: ConnectionSecrets,
     transcript: HandshakeHash,
 }
-impl WriteState for WriteChangeCipherSpec {
+impl EmitState for WriteChangeCipherSpec {
     type Data = Arc<ClientConfig>;
 
     fn generate_message(
@@ -473,7 +473,7 @@ impl WriteState for WriteChangeCipherSpec {
         log_msg(&msg, false);
 
         let next_state =
-            CommonState::AfterWrite(Box::new(CommonState::Write(Box::new(WriteFinished {
+            CommonState::AfterEmit(Box::new(CommonState::Emit(Box::new(WriteFinished {
                 secrets: self.secrets,
                 transcript: self.transcript,
             }))));
@@ -486,7 +486,7 @@ pub(crate) struct WriteFinished {
     secrets: ConnectionSecrets,
     transcript: HandshakeHash,
 }
-impl WriteState for WriteFinished {
+impl EmitState for WriteFinished {
     type Data = Arc<ClientConfig>;
 
     fn generate_message(
@@ -510,7 +510,7 @@ impl WriteState for WriteFinished {
 
         GeneratedMessage::new(
             msg,
-            CommonState::AfterWrite(Box::new(CommonState::Expect(Box::new(
+            CommonState::AfterEmit(Box::new(CommonState::Expect(Box::new(
                 ExpectChangeCipherSpec {
                     transcript: self.transcript,
                 },

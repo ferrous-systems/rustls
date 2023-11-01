@@ -75,7 +75,7 @@ pub(crate) trait ExpectState: Send + 'static {
     }
 }
 
-pub(crate) trait WriteState: Send + 'static {
+pub(crate) trait EmitState: Send + 'static {
     type Data;
 
     fn generate_message(
@@ -100,7 +100,7 @@ impl<Data> WriteAlert<Data> {
     }
 }
 
-impl<Data: 'static + Send> WriteState for WriteAlert<Data> {
+impl<Data: 'static + Send> EmitState for WriteAlert<Data> {
     type Data = Data;
 
     fn generate_message(
@@ -109,7 +109,7 @@ impl<Data: 'static + Send> WriteState for WriteAlert<Data> {
     ) -> GeneratedMessage<Self::Data> {
         GeneratedMessage::new(
             Message::build_alert(AlertLevel::Fatal, self.description),
-            CommonState::AfterWrite(Box::new(CommonState::Poisoned(self.error))),
+            CommonState::AfterEmit(Box::new(CommonState::Poisoned(self.error))),
         )
     }
 }
@@ -121,7 +121,7 @@ pub(crate) struct RetryWrite<Data> {
     next_state: Box<CommonState<Data>>,
 }
 
-impl<Data: 'static + Send> WriteState for RetryWrite<Data> {
+impl<Data: 'static + Send> EmitState for RetryWrite<Data> {
     type Data = Data;
 
     fn generate_message(
@@ -150,8 +150,8 @@ pub(crate) enum CommonState<Data> {
         curr_state: Box<dyn ExpectState<Data = Data>>,
     },
     Expect(Box<dyn ExpectState<Data = Data>>),
-    Write(Box<dyn WriteState<Data = Data>>),
-    AfterWrite(Box<Self>),
+    Emit(Box<dyn EmitState<Data = Data>>),
+    AfterEmit(Box<Self>),
     Intermediate(Box<dyn IntermediateState<Data = Data>>),
     HandshakeDone,
     Poisoned(Error),
@@ -200,14 +200,14 @@ impl<Data: 'static + Send> LlConnectionCommon<Data> {
                 CommonState::Poisoned(err) => {
                     return Err(err);
                 }
-                state @ CommonState::Write(_) => {
+                state @ CommonState::Emit(_) => {
                     self.state = state;
                     return Ok(Status {
                         discard: core::mem::take(&mut self.offset),
                         state: State::MustEncryptTlsData(MustEncryptTlsData { conn: self }),
                     });
                 }
-                CommonState::AfterWrite(next_state) => {
+                CommonState::AfterEmit(next_state) => {
                     return Ok(Status {
                         discard: core::mem::take(&mut self.offset),
                         state: State::MustTransmitTlsData(MustTransmitTlsData {
@@ -309,7 +309,7 @@ impl<Data: 'static + Send> LlConnectionCommon<Data> {
             skip_index,
             next_state,
         } = match self.state.take() {
-            CommonState::Write(state) => state.generate_message(self),
+            CommonState::Emit(state) => state.generate_message(self),
             _ => unreachable!(),
         };
 
@@ -334,7 +334,7 @@ impl<Data: 'static + Send> LlConnectionCommon<Data> {
 
                 drop(iter);
 
-                self.state = CommonState::Write(Box::new(RetryWrite {
+                self.state = CommonState::Emit(Box::new(RetryWrite {
                     plain_msg,
                     index,
                     needs_encryption,
@@ -413,7 +413,7 @@ impl<Data: 'static + Send> LlConnectionCommon<Data> {
         curr_state: CommonState<Data>,
     ) -> Result<(), Error> {
         self.state = if let AlertLevel::Unknown(_) = alert.level {
-            CommonState::Write(Box::new(WriteAlert::new(
+            CommonState::Emit(Box::new(WriteAlert::new(
                 AlertDescription::IllegalParameter,
                 Error::AlertReceived(alert.description),
             )))
