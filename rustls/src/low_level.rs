@@ -161,10 +161,7 @@ impl LlConnectionCommon {
             match self.state.take() {
                 CommonState::Unreachable => unreachable!(),
                 CommonState::ConnectionClosed => {
-                    return Ok(Status {
-                        discard: core::mem::take(&mut self.offset),
-                        state: State::ConnectionClosed,
-                    });
+                    return self.gen_status(|_| State::ConnectionClosed)
                 }
                 CommonState::Poisoned(err) => {
                     return Err(err);
@@ -172,21 +169,19 @@ impl LlConnectionCommon {
                 CommonState::Emit(state) => {
                     let generated_message = state.generate_message();
 
-                    return Ok(Status {
-                        discard: core::mem::take(&mut self.offset),
-                        state: State::MustEncryptTlsData(MustEncryptTlsData {
-                            conn: self,
+                    return self.gen_status(|conn| {
+                        State::MustEncryptTlsData(MustEncryptTlsData {
+                            conn,
                             generated_message,
-                        }),
+                        })
                     });
                 }
                 CommonState::AfterEmit(next_state) => {
-                    return Ok(Status {
-                        discard: core::mem::take(&mut self.offset),
-                        state: State::MustTransmitTlsData(MustTransmitTlsData {
-                            conn: self,
+                    return self.gen_status(|conn| {
+                        State::MustTransmitTlsData(MustTransmitTlsData {
+                            conn,
                             next_state: *next_state,
-                        }),
+                        })
                     });
                 }
                 CommonState::Expect(mut curr_state) => {
@@ -196,10 +191,8 @@ impl LlConnectionCommon {
                         Err(Error::InvalidMessage(InvalidMessage::MessageTooShort)) => {
                             self.state = CommonState::Expect(curr_state);
 
-                            return Ok(Status {
-                                discard: core::mem::take(&mut self.offset),
-                                state: State::NeedsMoreTlsData { num_bytes: None },
-                            });
+                            return self
+                                .gen_status(|_| State::NeedsMoreTlsData { num_bytes: None });
                         }
                         Err(err) => return Err(err),
                     };
@@ -229,12 +222,11 @@ impl LlConnectionCommon {
                             ContentType::ApplicationData => {
                                 self.state = state;
 
-                                return Ok(Status {
-                                    discard: core::mem::take(&mut self.offset),
-                                    state: State::AppDataAvailable(AppDataAvailable {
+                                return self.gen_status(|conn| {
+                                    State::AppDataAvailable(AppDataAvailable {
                                         incoming_tls: Some(incoming_tls),
-                                        conn: self,
-                                    }),
+                                        conn,
+                                    })
                                 });
                             }
                             ContentType::Alert => {
@@ -256,15 +248,23 @@ impl LlConnectionCommon {
                         Err(_) => {
                             self.state = state;
 
-                            return Ok(Status {
-                                discard: core::mem::take(&mut self.offset),
-                                state: State::TrafficTransit(TrafficTransit { conn: self }),
-                            });
+                            return self
+                                .gen_status(|conn| State::TrafficTransit(TrafficTransit { conn }));
                         }
                     }
                 }
             }
         }
+    }
+
+    fn gen_status<'c, 'i>(
+        &'c mut self,
+        f: impl FnOnce(&'c mut Self) -> State<'c, 'i>,
+    ) -> Result<Status<'c, 'i>, Error> {
+        Ok(Status {
+            discard: core::mem::take(&mut self.offset),
+            state: f(self),
+        })
     }
 
     fn encrypt_traffic_transit(
