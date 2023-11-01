@@ -109,10 +109,7 @@ impl<Data: 'static + Send> WriteState for WriteAlert<Data> {
     ) -> GeneratedMessage<Self::Data> {
         GeneratedMessage::new(
             Message::build_alert(AlertLevel::Fatal, self.description),
-            CommonState::Send(Box::new(SendAlert {
-                error: self.error,
-                _marker: PhantomData,
-            })),
+            CommonState::AfterWrite(Box::new(CommonState::Poisoned(self.error))),
         )
     }
 }
@@ -137,25 +134,6 @@ impl<Data: 'static + Send> WriteState for RetryWrite<Data> {
     }
 }
 
-pub(crate) trait SendState: Send + 'static {
-    type Data;
-
-    fn tls_data_done(self: Box<Self>) -> CommonState<Self::Data>;
-}
-
-pub(crate) struct SendAlert<Data> {
-    error: Error,
-    _marker: PhantomData<Data>,
-}
-
-impl<Data: Send + 'static> SendState for SendAlert<Data> {
-    type Data = Data;
-
-    fn tls_data_done(self: Box<Self>) -> CommonState<Self::Data> {
-        CommonState::Poisoned(self.error)
-    }
-}
-
 pub(crate) trait IntermediateState: 'static + Send {
     type Data;
 
@@ -173,7 +151,7 @@ pub(crate) enum CommonState<Data> {
     },
     Expect(Box<dyn ExpectState<Data = Data>>),
     Write(Box<dyn WriteState<Data = Data>>),
-    Send(Box<dyn SendState<Data = Data>>),
+    AfterWrite(Box<Self>),
     Intermediate(Box<dyn IntermediateState<Data = Data>>),
     HandshakeDone,
     Poisoned(Error),
@@ -229,12 +207,12 @@ impl<Data: 'static + Send> LlConnectionCommon<Data> {
                         state: State::MustEncryptTlsData(MustEncryptTlsData { conn: self }),
                     });
                 }
-                CommonState::Send(curr_state) => {
+                CommonState::AfterWrite(next_state) => {
                     return Ok(Status {
                         discard: core::mem::take(&mut self.offset),
                         state: State::MustTransmitTlsData(MustTransmitTlsData {
                             conn: self,
-                            curr_state,
+                            next_state: *next_state,
                         }),
                     });
                 }
@@ -634,13 +612,13 @@ pub struct MustTransmitTlsData<'c, Data> {
     /// FIXME: docs
     conn: &'c mut LlConnectionCommon<Data>,
     /// FIXME: docs
-    curr_state: Box<dyn SendState<Data = Data>>,
+    next_state: CommonState<Data>,
 }
 
 impl<'c, Data: 'static + Send> MustTransmitTlsData<'c, Data> {
     /// FIXME: docs
     pub fn done(self) {
-        self.conn.state = self.curr_state.tls_data_done();
+        self.conn.state = self.next_state;
     }
 }
 

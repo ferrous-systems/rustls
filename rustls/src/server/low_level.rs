@@ -12,7 +12,7 @@ use crate::conn::ConnectionRandoms;
 use crate::crypto::SupportedKxGroup;
 use crate::dns_name::DnsName;
 use crate::hash_hs::{HandshakeHash, HandshakeHashBuffer};
-use crate::low_level::{GeneratedMessage, IntermediateState, SendState, WriteState, log_msg};
+use crate::low_level::{log_msg, GeneratedMessage, IntermediateState, WriteState};
 use crate::msgs::codec::Codec;
 use crate::msgs::enums::ECPointFormat;
 use crate::msgs::handshake::{
@@ -390,36 +390,14 @@ impl WriteState for WriteServerHello {
 
         GeneratedMessage::new(
             sh,
-            CommonState::Send(Box::new(SendServerHello {
+            CommonState::AfterWrite(Box::new(CommonState::Write(Box::new(WriteCertificate {
                 transcript: self.transcript,
                 certkey: self.certkey,
                 randoms: self.randoms,
                 sigschemes: self.sigschemes,
                 selected_group: self.selected_group,
-            })),
+            })))),
         )
-    }
-}
-
-struct SendServerHello {
-    transcript: HandshakeHash,
-    certkey: Arc<CertifiedKey>,
-    sigschemes: Vec<SignatureScheme>,
-    randoms: ConnectionRandoms,
-    selected_group: &'static dyn SupportedKxGroup,
-}
-
-impl SendState for SendServerHello {
-    type Data = Arc<ServerConfig>;
-
-    fn tls_data_done(self: Box<Self>) -> CommonState<Self::Data> {
-        CommonState::Write(Box::new(WriteCertificate {
-            transcript: self.transcript,
-            certkey: self.certkey,
-            randoms: self.randoms,
-            sigschemes: self.sigschemes,
-            selected_group: self.selected_group,
-        }))
     }
 }
 
@@ -455,36 +433,16 @@ impl WriteState for WriteCertificate {
 
         GeneratedMessage::new(
             c,
-            CommonState::Send(Box::new(SendCertificate {
-                transcript: self.transcript,
-                certkey: self.certkey,
-                sigschemes: self.sigschemes,
-                randoms: self.randoms,
-                selected_group: self.selected_group,
-            })),
+            CommonState::AfterWrite(Box::new(CommonState::Intermediate(Box::new(
+                PrepareKeyExchange {
+                    transcript: self.transcript,
+                    certkey: self.certkey,
+                    sigschemes: self.sigschemes,
+                    randoms: self.randoms,
+                    selected_group: self.selected_group,
+                },
+            )))),
         )
-    }
-}
-
-struct SendCertificate {
-    transcript: HandshakeHash,
-    certkey: Arc<CertifiedKey>,
-    sigschemes: Vec<SignatureScheme>,
-    randoms: ConnectionRandoms,
-    selected_group: &'static dyn SupportedKxGroup,
-}
-
-impl SendState for SendCertificate {
-    type Data = Arc<ServerConfig>;
-
-    fn tls_data_done(self: Box<Self>) -> CommonState<Self::Data> {
-        CommonState::Intermediate(Box::new(PrepareKeyExchange {
-            transcript: self.transcript,
-            certkey: self.certkey,
-            sigschemes: self.sigschemes,
-            randoms: self.randoms,
-            selected_group: self.selected_group,
-        }))
     }
 }
 
@@ -560,16 +518,9 @@ impl WriteState for WriteServerKeyExchange {
 
         self.transcript.add_message(&m);
 
-        GeneratedMessage::new(m, CommonState::Send(Box::new(SendServerKeyExchange {})))
-    }
-}
-
-struct SendServerKeyExchange {}
-
-impl SendState for SendServerKeyExchange {
-    type Data = Arc<ServerConfig>;
-
-    fn tls_data_done(self: Box<Self>) -> CommonState<Self::Data> {
-        todo!()
+        GeneratedMessage::new(
+            m,
+            CommonState::AfterWrite(Box::new(CommonState::Unreachable)),
+        )
     }
 }

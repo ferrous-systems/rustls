@@ -13,7 +13,7 @@ use crate::crypto::ActiveKeyExchange;
 use crate::hash_hs::{HandshakeHash, HandshakeHashBuffer};
 use crate::low_level::{
     log_msg, CommonState, ExpectState, GeneratedMessage, IntermediateState, LlConnectionCommon,
-    SendState, WriteAlert, WriteState,
+    WriteAlert, WriteState,
 };
 use crate::msgs::base::{Payload, PayloadU8};
 use crate::msgs::ccs::ChangeCipherSpecPayload;
@@ -136,31 +136,14 @@ impl WriteState for WriteClientHello {
 
         let mut transcript_buffer = HandshakeHashBuffer::new();
         transcript_buffer.add_message(&msg);
-        let next_state = CommonState::Send(Box::new(SendClientHello {
-            name: self.name,
-            transcript_buffer,
-            random: self.random,
-        }));
+        let next_state =
+            CommonState::AfterWrite(Box::new(CommonState::Expect(Box::new(ExpectServerHello {
+                name: self.name,
+                transcript_buffer,
+                random: self.random,
+            }))));
 
         GeneratedMessage::new(msg, next_state)
-    }
-}
-
-pub(crate) struct SendClientHello {
-    name: ServerName,
-    transcript_buffer: HandshakeHashBuffer,
-    random: Random,
-}
-
-impl SendState for SendClientHello {
-    type Data = Arc<ClientConfig>;
-
-    fn tls_data_done(self: Box<Self>) -> CommonState<Self::Data> {
-        CommonState::Expect(Box::new(ExpectServerHello {
-            name: self.name,
-            transcript_buffer: self.transcript_buffer,
-            random: self.random,
-        }))
     }
 }
 
@@ -462,27 +445,13 @@ impl IntermediateState for SetupClientEncryption {
                 .prepare_message_decrypter(dec);
             common.record_layer.start_encrypting();
 
-            Ok(CommonState::Send(Box::new(SendClientKeyExchange {
-                secrets,
-                transcript: self.transcript,
-            })))
+            Ok(CommonState::AfterWrite(Box::new(CommonState::Write(
+                Box::new(WriteChangeCipherSpec {
+                    secrets,
+                    transcript: self.transcript,
+                }),
+            ))))
         }
-    }
-}
-
-pub(crate) struct SendClientKeyExchange {
-    secrets: ConnectionSecrets,
-    transcript: HandshakeHash,
-}
-
-impl SendState for SendClientKeyExchange {
-    type Data = Arc<ClientConfig>;
-
-    fn tls_data_done(self: Box<Self>) -> CommonState<Self::Data> {
-        CommonState::Write(Box::new(WriteChangeCipherSpec {
-            secrets: self.secrets,
-            transcript: self.transcript,
-        }))
     }
 }
 
@@ -503,28 +472,13 @@ impl WriteState for WriteChangeCipherSpec {
         };
         log_msg(&msg, false);
 
-        let next_state = CommonState::Send(Box::new(SendChangeCipherSpec {
-            secrets: self.secrets,
-            transcript: self.transcript,
-        }));
+        let next_state =
+            CommonState::AfterWrite(Box::new(CommonState::Write(Box::new(WriteFinished {
+                secrets: self.secrets,
+                transcript: self.transcript,
+            }))));
 
         GeneratedMessage::new(msg, next_state)
-    }
-}
-
-pub(crate) struct SendChangeCipherSpec {
-    secrets: ConnectionSecrets,
-    transcript: HandshakeHash,
-}
-
-impl SendState for SendChangeCipherSpec {
-    type Data = Arc<ClientConfig>;
-
-    fn tls_data_done(self: Box<Self>) -> CommonState<Self::Data> {
-        CommonState::Write(Box::new(WriteFinished {
-            secrets: self.secrets,
-            transcript: self.transcript,
-        }))
     }
 }
 
@@ -556,25 +510,13 @@ impl WriteState for WriteFinished {
 
         GeneratedMessage::new(
             msg,
-            CommonState::Send(Box::new(SendFinished {
-                transcript: self.transcript,
-            })),
+            CommonState::AfterWrite(Box::new(CommonState::Expect(Box::new(
+                ExpectChangeCipherSpec {
+                    transcript: self.transcript,
+                },
+            )))),
         )
         .require_encryption(true)
-    }
-}
-
-pub(crate) struct SendFinished {
-    transcript: HandshakeHash,
-}
-
-impl SendState for SendFinished {
-    type Data = Arc<ClientConfig>;
-
-    fn tls_data_done(self: Box<Self>) -> CommonState<Self::Data> {
-        CommonState::Expect(Box::new(ExpectChangeCipherSpec {
-            transcript: self.transcript,
-        }))
     }
 }
 
