@@ -392,32 +392,30 @@ pub(crate) struct SetupClientEncryption {
 
 impl IntermediateState for SetupClientEncryption {
     fn next_state(self: Box<Self>, common: &mut LlConnectionCommon) -> Result<CommonState, Error> {
-        {
-            let secrets = ConnectionSecrets::from_key_exchange(
-                self.kx,
-                &self.peer_pub_key,
-                Some(self.transcript.get_current_hash()),
-                self.randoms,
-                self.suite,
-            )?;
+        let secrets = ConnectionSecrets::from_key_exchange(
+            self.kx,
+            &self.peer_pub_key,
+            Some(self.transcript.get_current_hash()),
+            self.randoms,
+            self.suite,
+        )?;
 
-            let (dec, enc) = secrets.make_cipher_pair(Side::Client);
+        let (dec, enc) = secrets.make_cipher_pair(Side::Client);
 
-            common
-                .record_layer
-                .prepare_message_encrypter(enc);
-            common
-                .record_layer
-                .prepare_message_decrypter(dec);
-            common.record_layer.start_encrypting();
+        common
+            .record_layer
+            .prepare_message_encrypter(enc);
+        common
+            .record_layer
+            .prepare_message_decrypter(dec);
+        common.record_layer.start_encrypting();
 
-            Ok(CommonState::AfterEmit(Box::new(CommonState::Emit(
-                Box::new(WriteChangeCipherSpec {
-                    secrets,
-                    transcript: self.transcript,
-                }),
-            ))))
-        }
+        Ok(CommonState::AfterEmit(Box::new(CommonState::Emit(
+            Box::new(WriteChangeCipherSpec {
+                secrets,
+                transcript: self.transcript,
+            }),
+        ))))
     }
 }
 
