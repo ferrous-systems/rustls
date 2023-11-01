@@ -156,10 +156,10 @@ impl<Data: Send + 'static> SendState for SendAlert<Data> {
     }
 }
 
-pub(crate) trait SetupEncryptionState: 'static + Send {
+pub(crate) trait IntermediateState: 'static + Send {
     type Data;
 
-    fn setup_encryption(
+    fn next_state(
         self: Box<Self>,
         common: &mut LlConnectionCommon<Self::Data>,
     ) -> Result<CommonState<Self::Data>, Error>;
@@ -174,7 +174,7 @@ pub(crate) enum CommonState<Data> {
     Expect(Box<dyn ExpectState<Data = Data>>),
     Write(Box<dyn WriteState<Data = Data>>),
     Send(Box<dyn SendState<Data = Data>>),
-    SetupEncryption(Box<dyn SetupEncryptionState<Data = Data>>),
+    Intermediate(Box<dyn IntermediateState<Data = Data>>),
     HandshakeDone,
     Poisoned(Error),
     ConnectionClosed,
@@ -275,8 +275,8 @@ impl<Data: 'static + Send> LlConnectionCommon<Data> {
                 } => {
                     self.state = curr_state.process_message(self, message)?;
                 }
-                CommonState::SetupEncryption(state) => {
-                    self.state = state.setup_encryption(self)?;
+                CommonState::Intermediate(state) => {
+                    self.state = state.next_state(self)?;
                 }
                 state @ CommonState::HandshakeDone => {
                     let mut reader = Reader::init(&incoming_tls[self.offset..]);

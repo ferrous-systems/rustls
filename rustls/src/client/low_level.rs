@@ -12,8 +12,8 @@ use crate::conn::ConnectionRandoms;
 use crate::crypto::ActiveKeyExchange;
 use crate::hash_hs::{HandshakeHash, HandshakeHashBuffer};
 use crate::low_level::{
-    log_msg, CommonState, ExpectState, GeneratedMessage, LlConnectionCommon, SendState,
-    SetupEncryptionState, WriteAlert, WriteState,
+    log_msg, CommonState, ExpectState, GeneratedMessage, IntermediateState, LlConnectionCommon,
+    SendState, WriteAlert, WriteState,
 };
 use crate::msgs::base::{Payload, PayloadU8};
 use crate::msgs::ccs::ChangeCipherSpecPayload;
@@ -416,7 +416,7 @@ impl WriteState for WriteClientKeyExchange {
 
         self.transcript.add_message(&msg);
 
-        let next_state = CommonState::SetupEncryption(Box::new(SetupClientEncryption {
+        let next_state = CommonState::Intermediate(Box::new(SetupClientEncryption {
             kx: self.kx,
             peer_pub_key: self.ecdh_params.public.0,
             randoms: self.randoms,
@@ -436,10 +436,10 @@ pub(crate) struct SetupClientEncryption {
     transcript: HandshakeHash,
 }
 
-impl SetupEncryptionState for SetupClientEncryption {
+impl IntermediateState for SetupClientEncryption {
     type Data = Arc<ClientConfig>;
 
-    fn setup_encryption(
+    fn next_state(
         self: Box<Self>,
         common: &mut LlConnectionCommon<Self::Data>,
     ) -> Result<CommonState<Self::Data>, Error> {
