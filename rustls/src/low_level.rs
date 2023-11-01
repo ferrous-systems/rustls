@@ -61,11 +61,7 @@ impl GeneratedMessage {
 }
 
 pub(crate) trait ExpectState: Send + 'static {
-    fn process_message(
-        self: Box<Self>,
-        common: &mut LlConnectionCommon,
-        msg: Message,
-    ) -> Result<CommonState, Error>;
+    fn process_message(self: Box<Self>, msg: Message) -> Result<CommonState, Error>;
 
     fn get_transcript_mut(&mut self) -> Option<&mut HandshakeHash> {
         None
@@ -224,7 +220,7 @@ impl LlConnectionCommon {
                     message,
                     curr_state,
                 } => {
-                    self.state = curr_state.process_message(self, message)?;
+                    self.state = curr_state.process_message(message)?;
                 }
                 CommonState::Intermediate(state) => {
                     self.state = state.next_state(self)?;

@@ -71,11 +71,7 @@ struct ExpectClientHello {
 }
 
 impl ExpectState for ExpectClientHello {
-    fn process_message(
-        self: Box<Self>,
-        _common: &mut LlConnectionCommon,
-        msg: Message,
-    ) -> Result<CommonState, Error> {
+    fn process_message(self: Box<Self>, msg: Message) -> Result<CommonState, Error> {
         let client_hello = require_handshake_msg!(
             msg,
             HandshakeType::ClientHello,
