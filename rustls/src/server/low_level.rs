@@ -38,11 +38,11 @@ use crate::{
 
 /// FIXME: docs
 pub struct LlServerConnection {
-    conn: LlConnectionCommon<Arc<ServerConfig>>,
+    conn: LlConnectionCommon,
 }
 
 impl Deref for LlServerConnection {
-    type Target = LlConnectionCommon<Arc<ServerConfig>>;
+    type Target = LlConnectionCommon;
 
     fn deref(&self) -> &Self::Target {
         &self.conn
@@ -59,32 +59,23 @@ impl LlServerConnection {
     /// FIXME: docs
     pub fn new(config: Arc<ServerConfig>) -> Result<Self, Error> {
         Ok(Self {
-            conn: LlConnectionCommon::new(
+            conn: LlConnectionCommon::new(CommonState::Expect(Box::new(ExpectClientHello {
                 config,
-                CommonState::Expect(Box::new(ExpectClientHello::new())),
-            )?,
+            })))?,
         })
     }
 }
 
 struct ExpectClientHello {
-    sni: Option<DnsName>,
-}
-
-impl ExpectClientHello {
-    fn new() -> Self {
-        Self { sni: None }
-    }
+    config: Arc<ServerConfig>,
 }
 
 impl ExpectState for ExpectClientHello {
-    type Data = Arc<ServerConfig>;
-
     fn process_message(
         self: Box<Self>,
-        common: &mut LlConnectionCommon<Self::Data>,
+        _common: &mut LlConnectionCommon,
         msg: Message,
-    ) -> Result<CommonState<Self::Data>, Error> {
+    ) -> Result<CommonState, Error> {
         let client_hello = require_handshake_msg!(
             msg,
             HandshakeType::ClientHello,
@@ -108,7 +99,7 @@ impl ExpectState for ExpectClientHello {
             ))));
         }
 
-        let sni: Option<DnsName> = match client_hello.get_sni_extension() {
+        let _sni: Option<DnsName> = match client_hello.get_sni_extension() {
             Some(sni) => {
                 if sni.has_duplicate_names_for_type() {
                     return Ok(CommonState::Emit(Box::new(WriteAlert::new(
@@ -138,7 +129,7 @@ impl ExpectState for ExpectClientHello {
 
         let mut sig_schemes = sig_schemes.to_owned();
 
-        let tls12_enabled = common
+        let tls12_enabled = self
             .config
             .supports_version(ProtocolVersion::TLSv1_2);
 
@@ -161,7 +152,7 @@ impl ExpectState for ExpectClientHello {
             ProtocolVersion::TLSv1_2
         };
 
-        let client_suites = common
+        let client_suites = self
             .config
             .cipher_suites
             .iter()
@@ -179,13 +170,13 @@ impl ExpectState for ExpectClientHello {
         // Choose a certificate.
         let certkey = {
             let client_hello = ClientHello::new(
-                &self.sni,
+                &None,
                 &sig_schemes,
                 client_hello.get_alpn_extension(),
                 &client_hello.cipher_suites,
             );
 
-            let Some(certkey) = common
+            let Some(certkey) = self
                 .config
                 .cert_resolver
                 .resolve(client_hello)
@@ -204,14 +195,14 @@ impl ExpectState for ExpectClientHello {
         // Reduce our supported ciphersuites by the certificate.
         // (no-op for TLS1.3)
         let suitable_suites = suites::reduce_given_sigalg(
-            &common.config.cipher_suites,
+            &self.config.cipher_suites,
             active_certkey.get_key().algorithm(),
         );
 
         // And version
         let suitable_suites = suites::reduce_given_version(&suitable_suites, version);
 
-        let suite = if common.config.ignore_client_order {
+        let suite = if self.config.ignore_client_order {
             suites::choose_ciphersuite_preferring_server(
                 &client_hello.cipher_suites,
                 &suitable_suites,
@@ -241,7 +232,7 @@ impl ExpectState for ExpectClientHello {
 
         // Save their Random.
         let randoms =
-            ConnectionRandoms::new(client_hello.random, Random::new(common.config.provider)?);
+            ConnectionRandoms::new(client_hello.random, Random::new(self.config.provider)?);
 
         // -- TLS1.2 only from hereon in --
         transcript.add_message(&msg);
@@ -278,7 +269,7 @@ impl ExpectState for ExpectClientHello {
                 PeerIncompatible::NoSignatureSchemesInCommon,
             ))));
         }
-        let Some(group) = common
+        let Some(group) = self
             .config
             .kx_groups
             .iter()
@@ -305,14 +296,10 @@ impl ExpectState for ExpectClientHello {
         debug_assert_eq!(ecpoint, ECPointFormat::Uncompressed);
 
         // If we're not offered a ticket or a potential session ID, allocate a session ID.
-        let session_id = if !common
-            .config
-            .session_storage
-            .can_cache()
-        {
+        let session_id = if !self.config.session_storage.can_cache() {
             SessionId::empty()
         } else {
-            SessionId::random(common.config.provider)?
+            SessionId::random(self.config.provider)?
         };
 
         let mut ocsp_response = active_certkey.get_ocsp();
@@ -320,7 +307,7 @@ impl ExpectState for ExpectClientHello {
         let mut ep = hs::ExtensionProcessing::new();
         let mut alpn_protocol = None;
         if let Err((opt_desc, err)) = ep.process_common_aux(
-            &common.config,
+            &self.config,
             &mut alpn_protocol,
             #[cfg(feature = "quic")]
             false,
@@ -337,7 +324,7 @@ impl ExpectState for ExpectClientHello {
                 None => Err(err),
             };
         }
-        ep.process_tls12(&common.config, client_hello, using_ems);
+        ep.process_tls12(&self.config, client_hello, using_ems);
 
         Ok(CommonState::Emit(Box::new(WriteServerHello {
             session_id,
@@ -364,12 +351,7 @@ struct WriteServerHello {
 }
 
 impl EmitState for WriteServerHello {
-    type Data = Arc<ServerConfig>;
-
-    fn generate_message(
-        mut self: Box<Self>,
-        _conn: &mut LlConnectionCommon<Self::Data>,
-    ) -> GeneratedMessage<Self::Data> {
+    fn generate_message(mut self: Box<Self>, _conn: &mut LlConnectionCommon) -> GeneratedMessage {
         let sh = Message {
             version: ProtocolVersion::TLSv1_2,
             payload: MessagePayload::handshake(HandshakeMessagePayload {
@@ -410,12 +392,7 @@ struct WriteCertificate {
 }
 
 impl EmitState for WriteCertificate {
-    type Data = Arc<ServerConfig>;
-
-    fn generate_message(
-        mut self: Box<Self>,
-        conn: &mut LlConnectionCommon<Self::Data>,
-    ) -> GeneratedMessage<Self::Data> {
+    fn generate_message(mut self: Box<Self>, _conn: &mut LlConnectionCommon) -> GeneratedMessage {
         let c = Message {
             version: ProtocolVersion::TLSv1_2,
             payload: MessagePayload::handshake(HandshakeMessagePayload {
@@ -455,12 +432,7 @@ struct PrepareKeyExchange {
 }
 
 impl IntermediateState for PrepareKeyExchange {
-    type Data = Arc<ServerConfig>;
-
-    fn next_state(
-        self: Box<Self>,
-        common: &mut LlConnectionCommon<Self::Data>,
-    ) -> Result<CommonState<Self::Data>, Error> {
+    fn next_state(self: Box<Self>, _common: &mut LlConnectionCommon) -> Result<CommonState, Error> {
         let kx = self
             .selected_group
             .start()
@@ -496,12 +468,7 @@ struct WriteServerKeyExchange {
 }
 
 impl EmitState for WriteServerKeyExchange {
-    type Data = Arc<ServerConfig>;
-
-    fn generate_message(
-        mut self: Box<Self>,
-        _conn: &mut LlConnectionCommon<Self::Data>,
-    ) -> GeneratedMessage<Self::Data> {
+    fn generate_message(mut self: Box<Self>, _conn: &mut LlConnectionCommon) -> GeneratedMessage {
         let skx = ServerKeyExchangePayload::ECDHE(ECDHEServerKeyExchange {
             params: self.secdh,
             dss: DigitallySignedStruct::new(self.sigscheme, self.sig),
