@@ -21,7 +21,7 @@ use crate::{
 };
 use crate::{AlertDescription, ContentType, InvalidMessage};
 
-pub(crate) fn log_msg(msg: &Message, read: bool) {
+fn log_msg(msg: &Message, read: bool) {
     let verb = if read { "Read" } else { "Emit" };
     match &msg.payload {
         MessagePayload::Handshake {

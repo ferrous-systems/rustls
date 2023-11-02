@@ -12,7 +12,7 @@ use crate::conn::ConnectionRandoms;
 use crate::crypto::SupportedKxGroup;
 use crate::dns_name::DnsName;
 use crate::hash_hs::{HandshakeHash, HandshakeHashBuffer};
-use crate::low_level::{log_msg, EmitState, GeneratedMessage, IntermediateState};
+use crate::low_level::{EmitState, GeneratedMessage, IntermediateState};
 use crate::msgs::codec::Codec;
 use crate::msgs::enums::ECPointFormat;
 use crate::msgs::handshake::{
@@ -362,7 +362,6 @@ impl EmitState for EmitServerHello {
                 }),
             }),
         };
-        log_msg(&sh, false);
 
         self.transcript.add_message(&sh);
 
@@ -400,7 +399,6 @@ impl EmitState for EmitCertificate {
                 ),
             }),
         };
-        log_msg(&c, false);
 
         self.transcript.add_message(&c);
 
@@ -477,7 +475,6 @@ impl EmitState for EmitServerKeyExchange {
                 payload: HandshakePayload::ServerKeyExchange(skx),
             }),
         };
-        log_msg(&m, false);
 
         self.transcript.add_message(&m);
 

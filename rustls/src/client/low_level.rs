@@ -12,7 +12,7 @@ use crate::conn::ConnectionRandoms;
 use crate::crypto::ActiveKeyExchange;
 use crate::hash_hs::{HandshakeHash, HandshakeHashBuffer};
 use crate::low_level::{
-    log_msg, CommonState, EmitAlert, EmitState, ExpectState, GeneratedMessage, IntermediateState,
+    CommonState, EmitAlert, EmitState, ExpectState, GeneratedMessage, IntermediateState,
     LlConnectionCommon,
 };
 use crate::msgs::base::{Payload, PayloadU8};
@@ -121,7 +121,6 @@ impl EmitState for EmitClientHello {
             version: ProtocolVersion::TLSv1_0,
             payload: MessagePayload::handshake(payload),
         };
-        log_msg(&msg, false);
 
         let mut transcript_buffer = HandshakeHashBuffer::new();
         transcript_buffer.add_message(&msg);
@@ -367,7 +366,6 @@ impl EmitState for EmitClientKeyExchange {
                 payload: HandshakePayload::ClientKeyExchange(pubkey),
             }),
         };
-        log_msg(&msg, false);
 
         self.transcript.add_message(&msg);
 
@@ -430,7 +428,6 @@ impl EmitState for EmitChangeCipherSpec {
             version: ProtocolVersion::TLSv1_2,
             payload: MessagePayload::ChangeCipherSpec(ChangeCipherSpecPayload {}),
         };
-        log_msg(&msg, false);
 
         let next_state =
             CommonState::AfterEmit(Box::new(CommonState::Emit(Box::new(EmitFinished {
@@ -459,7 +456,6 @@ impl EmitState for EmitFinished {
                 payload: HandshakePayload::Finished(verify_data_payload),
             }),
         };
-        log_msg(&msg, false);
 
         self.transcript.add_message(&msg);
 
