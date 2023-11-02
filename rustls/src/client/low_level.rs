@@ -389,7 +389,7 @@ pub(crate) struct SetupClientEncryption {
 }
 
 impl IntermediateState for SetupClientEncryption {
-    fn next_state(self: Box<Self>, common: &mut LlConnectionCommon) -> Result<CommonState, Error> {
+    fn next_state(self: Box<Self>, conn: &mut LlConnectionCommon) -> Result<CommonState, Error> {
         let secrets = ConnectionSecrets::from_key_exchange(
             self.kx,
             &self.peer_pub_key,
@@ -400,13 +400,11 @@ impl IntermediateState for SetupClientEncryption {
 
         let (dec, enc) = secrets.make_cipher_pair(Side::Client);
 
-        common
-            .record_layer
+        conn.record_layer
             .prepare_message_encrypter(enc);
-        common
-            .record_layer
+        conn.record_layer
             .prepare_message_decrypter(dec);
-        common.record_layer.start_encrypting();
+        conn.record_layer.start_encrypting();
 
         Ok(CommonState::emit(EmitChangeCipherSpec {
             secrets,
@@ -489,8 +487,8 @@ pub(crate) struct StartDecrypting {
 }
 
 impl IntermediateState for StartDecrypting {
-    fn next_state(self: Box<Self>, common: &mut LlConnectionCommon) -> Result<CommonState, Error> {
-        common.record_layer.start_decrypting();
+    fn next_state(self: Box<Self>, conn: &mut LlConnectionCommon) -> Result<CommonState, Error> {
+        conn.record_layer.start_decrypting();
         Ok(CommonState::expect(ExpectFinished {
             transcript: self.transcript,
         }))

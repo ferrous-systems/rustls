@@ -71,7 +71,7 @@ pub(crate) trait ExpectState: Send + 'static {
 }
 
 pub(crate) trait IntermediateState: Send + 'static {
-    fn next_state(self: Box<Self>, common: &mut LlConnectionCommon) -> Result<CommonState, Error>;
+    fn next_state(self: Box<Self>, conn: &mut LlConnectionCommon) -> Result<CommonState, Error>;
 }
 
 pub(crate) trait EmitState: Send + 'static {

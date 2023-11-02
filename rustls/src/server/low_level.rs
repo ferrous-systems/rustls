@@ -423,7 +423,7 @@ struct PrepareKeyExchange {
 }
 
 impl IntermediateState for PrepareKeyExchange {
-    fn next_state(self: Box<Self>, _common: &mut LlConnectionCommon) -> Result<CommonState, Error> {
+    fn next_state(self: Box<Self>, _conn: &mut LlConnectionCommon) -> Result<CommonState, Error> {
         let kx = self
             .selected_group
             .start()
