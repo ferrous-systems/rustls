@@ -51,10 +51,6 @@ impl ConnectionState {
             error: err.into(),
         })
     }
-
-    pub(crate) fn as_after_encode(self) -> Self {
-        Self::AfterEncode(Box::new(self))
-    }
 }
 
 pub(crate) trait ExpectState: 'static {
@@ -489,7 +485,7 @@ impl<'c> MustEncodeTlsData<'c> {
             written_bytes += bytes.len();
         }
 
-        self.conn.state = next_state.take();
+        self.conn.state = ConnectionState::AfterEncode(Box::new(next_state.take()));
 
         Ok(written_bytes)
     }
@@ -563,7 +559,7 @@ impl GeneratedMessage {
             plain_msg: msg.into(),
             needs_encryption: false,
             skip_index: 0,
-            next_state: next_state.as_after_encode(),
+            next_state,
         }
     }
 
