@@ -83,6 +83,7 @@ pub(crate) trait EmitState: 'static {
 pub struct LlConnectionCommon {
     pub(crate) state: ConnectionState,
     pub(crate) record_layer: RecordLayer,
+    pub(crate) message_fragmenter: MessageFragmenter,
     pub(crate) offset: usize,
 }
 
@@ -92,6 +93,7 @@ impl LlConnectionCommon {
         Ok(Self {
             state,
             record_layer: RecordLayer::new(),
+            message_fragmenter: MessageFragmenter::default(),
             offset: 0,
         })
     }
@@ -450,7 +452,6 @@ impl<'c> MustEncodeTlsData<'c> {
     /// returns the number of bytes that were written into `outgoing_tls`, or an error if
     /// the provided buffer was too small. in the error case, `outgoing_tls` is not modified
     pub fn encode(&mut self, outgoing_tls: &mut [u8]) -> Result<usize, EncryptError> {
-        let message_fragmenter = MessageFragmenter::default();
         let GeneratedMessage {
             ref plain_msg,
             needs_encryption,
@@ -460,7 +461,9 @@ impl<'c> MustEncodeTlsData<'c> {
 
         let mut written_bytes = 0;
 
-        let mut iter = message_fragmenter
+        let mut iter = self
+            .conn
+            .message_fragmenter
             .fragment_message(plain_msg)
             .enumerate()
             .skip(skip_index);
