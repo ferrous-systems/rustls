@@ -446,7 +446,7 @@ impl<'c> MustEncodeTlsData<'c> {
             ref plain_msg,
             needs_encryption,
             skip_index,
-            ref mut next_state,
+            ref mut after_encode,
         } = self.generated_message;
 
         let mut written_bytes = 0;
@@ -483,7 +483,7 @@ impl<'c> MustEncodeTlsData<'c> {
             written_bytes += bytes.len();
         }
 
-        self.conn.state = ConnectionState::AfterEncode(Box::new(next_state.take()));
+        self.conn.state = ConnectionState::AfterEncode(Box::new(after_encode.take()));
 
         Ok(written_bytes)
     }
@@ -546,7 +546,7 @@ pub(crate) struct GeneratedMessage {
     plain_msg: PlainMessage,
     needs_encryption: bool,
     skip_index: usize,
-    next_state: ConnectionState,
+    after_encode: ConnectionState,
 }
 
 impl GeneratedMessage {
@@ -557,7 +557,7 @@ impl GeneratedMessage {
             plain_msg: msg.into(),
             needs_encryption: false,
             skip_index: 0,
-            next_state,
+            after_encode: next_state,
         }
     }
 
