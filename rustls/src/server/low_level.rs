@@ -16,7 +16,7 @@ use crate::low_level::{log_msg, EmitState, GeneratedMessage, IntermediateState};
 use crate::msgs::codec::Codec;
 use crate::msgs::enums::ECPointFormat;
 use crate::msgs::handshake::{
-    ECDHEServerKeyExchange, HandshakeMessagePayload, Random, ServerECDHParams, ServerExtension,
+    EcdheServerKeyExchange, HandshakeMessagePayload, Random, ServerEcdhParams, ServerExtension,
     ServerHelloPayload, ServerKeyExchangePayload, SessionId,
 };
 use crate::server::common::ActiveCertifiedKey;
@@ -433,7 +433,7 @@ impl IntermediateState for PrepareKeyExchange {
             .selected_group
             .start()
             .map_err(|_| Error::FailedToGetRandomBytes)?;
-        let secdh = ServerECDHParams::new(&*kx);
+        let secdh = ServerEcdhParams::new(&*kx);
 
         let mut msg = Vec::new();
         msg.extend(self.randoms.client);
@@ -460,12 +460,12 @@ struct EmitServerKeyExchange {
     transcript: HandshakeHash,
     sigscheme: SignatureScheme,
     sig: Vec<u8>,
-    secdh: ServerECDHParams,
+    secdh: ServerEcdhParams,
 }
 
 impl EmitState for EmitServerKeyExchange {
     fn generate_message(mut self: Box<Self>) -> GeneratedMessage {
-        let skx = ServerKeyExchangePayload::ECDHE(ECDHEServerKeyExchange {
+        let skx = ServerKeyExchangePayload::Ecdhe(EcdheServerKeyExchange {
             params: self.secdh,
             dss: DigitallySignedStruct::new(self.sigscheme, self.sig),
         });

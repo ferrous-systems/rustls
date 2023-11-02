@@ -151,34 +151,34 @@ impl ExpectState for ExpectServerHello {
             HandshakeType::ServerHello,
             HandshakePayload::ServerHello
         )?;
-        if let Some(suite) = self
+
+        let Some(suite) = self
             .config
             .find_cipher_suite(payload.cipher_suite)
-        {
-            let mut transcript = self
-                .transcript_buffer
-                .start_hash(suite.hash_provider());
-
-            transcript.add_message(&msg);
-
-            let suite = match suite {
-                SupportedCipherSuite::Tls12(suite) => suite,
-                SupportedCipherSuite::Tls13(_) => todo!(),
-            };
-
-            Ok(CommonState::Expect(Box::new(ExpectCertificate {
-                config: self.config,
-                name: self.name,
-                suite,
-                randoms: ConnectionRandoms::new(self.random, payload.random),
-                transcript,
-            })))
-        } else {
-            Ok(CommonState::Emit(Box::new(EmitAlert::new(
+        else {
+            return Ok(CommonState::Emit(Box::new(EmitAlert::new(
                 AlertDescription::HandshakeFailure,
                 PeerMisbehaved::SelectedUnofferedCipherSuite,
-            ))))
-        }
+            ))));
+        };
+        let mut transcript = self
+            .transcript_buffer
+            .start_hash(suite.hash_provider());
+
+        transcript.add_message(&msg);
+
+        let suite = match suite {
+            SupportedCipherSuite::Tls12(suite) => suite,
+            SupportedCipherSuite::Tls13(_) => todo!(),
+        };
+
+        Ok(CommonState::Expect(Box::new(ExpectCertificate {
+            config: self.config,
+            name: self.name,
+            suite,
+            randoms: ConnectionRandoms::new(self.random, payload.random),
+            transcript,
+        })))
     }
 }
 
@@ -282,51 +282,52 @@ impl ExpectState for ExpectServerHelloDone {
                         payload: HandshakePayload::ServerHelloDone,
                     },
                 ..
-            } => match self
-                .opaque_kx
-                .unwrap_given_kxa(self.suite.kx)
-            {
-                Some(ecdhe) => {
-                    let mut kx_params = Vec::new();
-                    ecdhe.params.encode(&mut kx_params);
+            } => {
+                let Some(ecdhe) = self
+                    .opaque_kx
+                    .unwrap_given_kxa(self.suite.kx)
+                else {
+                    return Ok(CommonState::Emit(Box::new(EmitAlert::new(
+                        AlertDescription::DecodeError,
+                        InvalidMessage::MissingKeyExchange,
+                    ))));
+                };
 
-                    let mut rd = Reader::init(&kx_params);
-                    let ecdh_params = ServerEcdhParams::read(&mut rd)?;
+                let mut kx_params = Vec::new();
+                ecdhe.params.encode(&mut kx_params);
 
-                    if rd.any_left() {
-                        return Ok(CommonState::Emit(Box::new(EmitAlert::new(
-                            AlertDescription::DecodeError,
-                            InvalidMessage::InvalidDhParams,
-                        ))));
-                    }
+                let mut rd = Reader::init(&kx_params);
+                let ecdh_params = ServerEcdhParams::read(&mut rd)?;
 
-                    if let Some(skxg) = self
-                        .config
-                        .find_kx_group(ecdh_params.curve_params.named_group)
-                    {
-                        let kx = skxg
-                            .start()
-                            .map_err(|_| Error::FailedToGetRandomBytes)?;
-
-                        Ok(CommonState::Emit(Box::new(EmitClientKeyExchange {
-                            suite: self.suite,
-                            kx,
-                            ecdh_params,
-                            randoms: self.randoms,
-                            transcript: self.transcript,
-                        })))
-                    } else {
-                        Ok(CommonState::Emit(Box::new(EmitAlert::new(
-                            AlertDescription::IllegalParameter,
-                            PeerMisbehaved::IllegalHelloRetryRequestWithUnofferedNamedGroup,
-                        ))))
-                    }
+                if rd.any_left() {
+                    return Ok(CommonState::Emit(Box::new(EmitAlert::new(
+                        AlertDescription::DecodeError,
+                        InvalidMessage::InvalidDhParams,
+                    ))));
                 }
-                None => Ok(CommonState::Emit(Box::new(EmitAlert::new(
-                    AlertDescription::DecodeError,
-                    InvalidMessage::MissingKeyExchange,
-                )))),
-            },
+
+                let Some(skxg) = self
+                    .config
+                    .find_kx_group(ecdh_params.curve_params.named_group)
+                else {
+                    return Ok(CommonState::Emit(Box::new(EmitAlert::new(
+                        AlertDescription::IllegalParameter,
+                        PeerMisbehaved::IllegalHelloRetryRequestWithUnofferedNamedGroup,
+                    ))));
+                };
+
+                let kx = skxg
+                    .start()
+                    .map_err(|_| Error::FailedToGetRandomBytes)?;
+
+                Ok(CommonState::Emit(Box::new(EmitClientKeyExchange {
+                    suite: self.suite,
+                    kx,
+                    ecdh_params,
+                    randoms: self.randoms,
+                    transcript: self.transcript,
+                })))
+            }
             payload => {
                 return Err(inappropriate_handshake_message(
                     &payload,
