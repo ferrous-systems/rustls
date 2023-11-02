@@ -20,7 +20,7 @@ use crate::{
     },
     Error, ProtocolVersion,
 };
-use crate::{AlertDescription, ContentType, InvalidMessage};
+use crate::{AlertDescription, CommonState, ContentType, InvalidMessage};
 
 pub(crate) enum ConnectionState {
     Unreachable,
@@ -193,6 +193,49 @@ impl LlConnectionCommon {
             discard: core::mem::take(&mut self.offset),
             state: f(self),
         })
+    }
+
+    /// Encode `plain_msg` into `outgoing_tls`. Returns the number of written bytes when
+    /// successful. On failure returns the index of the first fragment that could not be written
+    /// to `outgoing_tls`.
+    fn encode_plain_msg(
+        &mut self,
+        plain_msg: &PlainMessage,
+        needs_encryption: bool,
+        skip_index: usize,
+        outgoing_tls: &mut [u8],
+    ) -> Result<usize, (EncodeError, usize)> {
+        let mut written_bytes = 0;
+
+        let mut iter = self
+            .message_fragmenter
+            .fragment_message(plain_msg)
+            .enumerate()
+            .skip(skip_index);
+
+        while let Some((index, m)) = iter.next() {
+            let opaque_msg = if needs_encryption {
+                self.record_layer.encrypt_outgoing(m)
+            } else {
+                m.to_unencrypted_opaque()
+            };
+
+            let bytes = opaque_msg.encode();
+
+            if bytes.len() > outgoing_tls.len() {
+                let required_size = bytes.len();
+
+                return Err((
+                    EncodeError::InsufficientSize(InsufficientSizeError { required_size }),
+                    index,
+                ));
+            }
+
+            outgoing_tls[written_bytes..written_bytes + bytes.len()].copy_from_slice(&bytes);
+            written_bytes += bytes.len();
+        }
+
+        Ok(written_bytes)
     }
 
     fn encrypt_traffic_transit(
@@ -449,43 +492,28 @@ impl<'c> MustEncodeTlsData<'c> {
             ref mut after_encode,
         } = self.generated_message;
 
-        let mut written_bytes = 0;
+        let Some(taken_after_encode) = after_encode.take() else {
+            return Err(EncodeError::AlreadyEncoded);
+        };
 
-        let mut iter = self
-            .conn
-            .message_fragmenter
-            .fragment_message(plain_msg)
-            .enumerate()
-            .skip(skip_index);
+        let encode_result =
+            self.conn
+                .encode_plain_msg(plain_msg, needs_encryption, skip_index, outgoing_tls);
 
-        while let Some((index, m)) = iter.next() {
-            let opaque_msg = if needs_encryption {
-                self.conn
-                    .record_layer
-                    .encrypt_outgoing(m)
-            } else {
-                m.to_unencrypted_opaque()
-            };
-
-            let bytes = opaque_msg.encode();
-
-            if bytes.len() > outgoing_tls.len() {
-                let required_size = bytes.len();
-
-                self.generated_message.skip_index = index;
-
-                return Err(EncodeError::InsufficientSize(InsufficientSizeError {
-                    required_size,
-                }));
+        match encode_result {
+            Ok(written_bytes) => {
+                self.conn.state = ConnectionState::AfterEncode(Box::new(taken_after_encode));
+                Ok(written_bytes)
             }
+            Err((err, index)) => {
+                // Skip over all the successful fragments on the next attempt.
+                self.generated_message.skip_index = index;
+                // Restore the state on failure.
+                *after_encode = Some(taken_after_encode);
 
-            outgoing_tls[written_bytes..written_bytes + bytes.len()].copy_from_slice(&bytes);
-            written_bytes += bytes.len();
+                Err(err)
+            }
         }
-
-        self.conn.state = ConnectionState::AfterEncode(Box::new(after_encode.take()));
-
-        Ok(written_bytes)
     }
 }
 
@@ -546,18 +574,18 @@ pub(crate) struct GeneratedMessage {
     plain_msg: PlainMessage,
     needs_encryption: bool,
     skip_index: usize,
-    after_encode: ConnectionState,
+    after_encode: Option<ConnectionState>,
 }
 
 impl GeneratedMessage {
-    pub(crate) fn new(msg: Message, next_state: ConnectionState) -> Self {
+    pub(crate) fn new(msg: Message, after_encode: ConnectionState) -> Self {
         log_msg(&msg, false);
 
         Self {
             plain_msg: msg.into(),
             needs_encryption: false,
             skip_index: 0,
-            after_encode: next_state,
+            after_encode: Some(after_encode),
         }
     }
 
