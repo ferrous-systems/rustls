@@ -99,10 +99,6 @@ pub(crate) trait IntermediateState: 'static + Send {
 
 pub(crate) enum CommonState {
     Unreachable,
-    Process {
-        message: Message,
-        curr_state: Box<dyn ExpectState>,
-    },
     Expect(Box<dyn ExpectState>),
     Emit(Box<dyn EmitState>),
     AfterEmit(Box<Self>),
@@ -155,8 +151,9 @@ impl LlConnectionCommon {
                             conn,
                             generated_message: state.generate_message(),
                         })
-                    });
+                    })
                 }
+
                 CommonState::AfterEmit(next_state) => {
                     return self.gen_status(|conn| {
                         State::MustTransmitTlsData(MustTransmitTlsData {
@@ -181,17 +178,8 @@ impl LlConnectionCommon {
                     if let MessagePayload::Alert(alert) = message.payload {
                         self.handle_alert(alert, CommonState::Expect(curr_state))?;
                     } else {
-                        self.state = CommonState::Process {
-                            message,
-                            curr_state,
-                        }
+                        self.state = curr_state.process_message(message)?;
                     };
-                }
-                CommonState::Process {
-                    message,
-                    curr_state,
-                } => {
-                    self.state = curr_state.process_message(message)?;
                 }
                 CommonState::Intermediate(state) => {
                     self.state = state.next_state(self)?;
