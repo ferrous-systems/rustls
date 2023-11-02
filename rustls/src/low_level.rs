@@ -28,7 +28,7 @@ pub(crate) enum ConnectionState {
     Emit(Box<dyn EmitState>),
     AfterEncode(Box<Self>),
     HandshakeDone,
-    Poisoned(Error),
+    AfterAlert(Error),
     ConnectionClosed,
 }
 
@@ -106,7 +106,7 @@ impl LlConnectionCommon {
                 ConnectionState::ConnectionClosed => {
                     return self.gen_status(|_| State::ConnectionClosed)
                 }
-                ConnectionState::Poisoned(err) => {
+                ConnectionState::AfterAlert(err) => {
                     return Err(err);
                 }
                 ConnectionState::Emit(state) => {
@@ -543,7 +543,7 @@ impl EmitState for EmitAlert {
     ) -> Result<GeneratedMessage, Error> {
         Ok(GeneratedMessage::new(
             Message::build_alert(AlertLevel::Fatal, self.description),
-            ConnectionState::Poisoned(self.error),
+            ConnectionState::AfterAlert(self.error),
         ))
     }
 }
