@@ -20,10 +20,10 @@ use crate::{
     },
     Error, ProtocolVersion,
 };
-use crate::{AlertDescription, CommonState, ContentType, InvalidMessage};
+use crate::{AlertDescription, ContentType, InvalidMessage};
 
 pub(crate) enum ConnectionState {
-    Unreachable,
+    Taken,
     Expect(Box<dyn ExpectState>),
     Emit(Box<dyn EmitState>),
     AfterEncode(Box<Self>),
@@ -33,10 +33,6 @@ pub(crate) enum ConnectionState {
 }
 
 impl ConnectionState {
-    fn take(&mut self) -> Self {
-        core::mem::replace(self, Self::Unreachable)
-    }
-
     pub(crate) fn expect(state: impl ExpectState) -> Self {
         Self::Expect(Box::new(state))
     }
@@ -97,8 +93,8 @@ impl LlConnectionCommon {
         incoming_tls: &'i mut [u8],
     ) -> Result<Status<'c, 'i>, Error> {
         loop {
-            match self.state.take() {
-                ConnectionState::Unreachable => unreachable!(),
+            match core::mem::replace(&mut self.state, ConnectionState::Taken) {
+                ConnectionState::Taken => unreachable!(),
                 ConnectionState::ConnectionClosed => {
                     return self.gen_status(|_| State::ConnectionClosed)
                 }

@@ -470,6 +470,6 @@ impl EmitState for EmitServerKeyExchange {
 
         self.transcript.add_message(&m);
 
-        Ok(GeneratedMessage::new(m, ConnectionState::Unreachable))
+        Ok(GeneratedMessage::new(m, ConnectionState::Taken))
     }
 }
