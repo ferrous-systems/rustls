@@ -7,6 +7,7 @@ use alloc::boxed::Box;
 use crate::crypto::cipher::{OpaqueMessage, PlainMessage};
 use crate::hash_hs::HandshakeHash;
 use crate::internal::record_layer::RecordLayer;
+use crate::msgs::alert::AlertMessagePayload;
 use crate::msgs::base::Payload;
 use crate::msgs::codec::Reader;
 use crate::msgs::enums::AlertLevel;
@@ -301,7 +302,7 @@ impl LlConnectionCommon {
 
     fn handle_alert(
         &mut self,
-        alert: crate::msgs::alert::AlertMessagePayload,
+        alert: AlertMessagePayload,
         curr_state: CommonState,
     ) -> Result<(), Error> {
         self.state = if let AlertLevel::Unknown(_) = alert.level {
