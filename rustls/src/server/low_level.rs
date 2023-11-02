@@ -12,7 +12,7 @@ use crate::conn::ConnectionRandoms;
 use crate::crypto::SupportedKxGroup;
 use crate::dns_name::DnsName;
 use crate::hash_hs::{HandshakeHash, HandshakeHashBuffer};
-use crate::low_level::{EmitState, GeneratedMessage, IntermediateState};
+use crate::low_level::{EmitState, GeneratedMessage};
 use crate::msgs::codec::Codec;
 use crate::msgs::enums::ECPointFormat;
 use crate::msgs::handshake::{
@@ -346,7 +346,10 @@ struct EmitServerHello {
 }
 
 impl EmitState for EmitServerHello {
-    fn generate_message(mut self: Box<Self>) -> GeneratedMessage {
+    fn generate_message(
+        mut self: Box<Self>,
+        _conn: &mut LlConnectionCommon,
+    ) -> Result<GeneratedMessage, Error> {
         let sh = Message {
             version: ProtocolVersion::TLSv1_2,
             payload: MessagePayload::handshake(HandshakeMessagePayload {
@@ -364,7 +367,7 @@ impl EmitState for EmitServerHello {
 
         self.transcript.add_message(&sh);
 
-        GeneratedMessage::new(
+        Ok(GeneratedMessage::new(
             sh,
             ConnectionState::emit(EmitCertificate {
                 transcript: self.transcript,
@@ -373,7 +376,7 @@ impl EmitState for EmitServerHello {
                 sigschemes: self.sigschemes,
                 selected_group: self.selected_group,
             }),
-        )
+        ))
     }
 }
 
@@ -386,7 +389,10 @@ struct EmitCertificate {
 }
 
 impl EmitState for EmitCertificate {
-    fn generate_message(mut self: Box<Self>) -> GeneratedMessage {
+    fn generate_message(
+        mut self: Box<Self>,
+        _conn: &mut LlConnectionCommon,
+    ) -> Result<GeneratedMessage, Error> {
         let c = Message {
             version: ProtocolVersion::TLSv1_2,
             payload: MessagePayload::handshake(HandshakeMessagePayload {
@@ -401,20 +407,20 @@ impl EmitState for EmitCertificate {
 
         self.transcript.add_message(&c);
 
-        GeneratedMessage::new(
+        Ok(GeneratedMessage::new(
             c,
-            ConnectionState::intermediate(PrepareKeyExchange {
+            ConnectionState::emit(EmitServerKeyExchange {
                 transcript: self.transcript,
                 certkey: self.certkey,
                 sigschemes: self.sigschemes,
                 randoms: self.randoms,
                 selected_group: self.selected_group,
             }),
-        )
+        ))
     }
 }
 
-struct PrepareKeyExchange {
+struct EmitServerKeyExchange {
     transcript: HandshakeHash,
     certkey: Arc<CertifiedKey>,
     sigschemes: Vec<SignatureScheme>,
@@ -422,11 +428,11 @@ struct PrepareKeyExchange {
     selected_group: &'static dyn SupportedKxGroup,
 }
 
-impl IntermediateState for PrepareKeyExchange {
-    fn next_state(
-        self: Box<Self>,
+impl EmitState for EmitServerKeyExchange {
+    fn generate_message(
+        mut self: Box<Self>,
         _conn: &mut LlConnectionCommon,
-    ) -> Result<ConnectionState, Error> {
+    ) -> Result<GeneratedMessage, Error> {
         let kx = self
             .selected_group
             .start()
@@ -445,27 +451,9 @@ impl IntermediateState for PrepareKeyExchange {
         let sigscheme = signer.scheme();
         let sig = signer.sign(&msg)?;
 
-        Ok(ConnectionState::emit(EmitServerKeyExchange {
-            transcript: self.transcript,
-            sigscheme,
-            sig,
-            secdh,
-        }))
-    }
-}
-
-struct EmitServerKeyExchange {
-    transcript: HandshakeHash,
-    sigscheme: SignatureScheme,
-    sig: Vec<u8>,
-    secdh: ServerEcdhParams,
-}
-
-impl EmitState for EmitServerKeyExchange {
-    fn generate_message(mut self: Box<Self>) -> GeneratedMessage {
         let skx = ServerKeyExchangePayload::Ecdhe(EcdheServerKeyExchange {
-            params: self.secdh,
-            dss: DigitallySignedStruct::new(self.sigscheme, self.sig),
+            params: secdh,
+            dss: DigitallySignedStruct::new(sigscheme, sig),
         });
 
         let m = Message {
@@ -478,6 +466,6 @@ impl EmitState for EmitServerKeyExchange {
 
         self.transcript.add_message(&m);
 
-        GeneratedMessage::new(m, ConnectionState::Unreachable)
+        Ok(GeneratedMessage::new(m, ConnectionState::Unreachable))
     }
 }

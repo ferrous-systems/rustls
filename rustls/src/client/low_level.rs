@@ -52,14 +52,8 @@ impl DerefMut for LlClientConnection {
 impl LlClientConnection {
     /// FIXME: docs
     pub fn new(config: Arc<ClientConfig>, name: ServerName) -> Result<Self, Error> {
-        let random = Random::new(config.provider)?;
-
         Ok(Self {
-            conn: LlConnectionCommon::new(ConnectionState::emit(EmitClientHello {
-                config,
-                name,
-                random,
-            }))?,
+            conn: LlConnectionCommon::new(ConnectionState::emit(EmitClientHello { config, name }))?,
         })
     }
 }
@@ -67,11 +61,15 @@ impl LlClientConnection {
 struct EmitClientHello {
     config: Arc<ClientConfig>,
     name: ServerName,
-    random: Random,
 }
 
 impl EmitState for EmitClientHello {
-    fn generate_message(self: Box<Self>) -> GeneratedMessage {
+    fn generate_message(
+        self: Box<Self>,
+        _conn: &mut LlConnectionCommon,
+    ) -> Result<GeneratedMessage, Error> {
+        let random = Random::new(self.config.provider)?;
+
         let support_tls12 = self
             .config
             .supports_version(ProtocolVersion::TLSv1_2);
@@ -85,7 +83,7 @@ impl EmitState for EmitClientHello {
             typ: HandshakeType::ClientHello,
             payload: HandshakePayload::ClientHello(ClientHelloPayload {
                 client_version: ProtocolVersion::TLSv1_2,
-                random: self.random,
+                random,
                 session_id: SessionId::empty(),
                 cipher_suites: self
                     .config
@@ -129,10 +127,10 @@ impl EmitState for EmitClientHello {
             config: self.config,
             name: self.name,
             transcript_buffer,
-            random: self.random,
+            random,
         });
 
-        GeneratedMessage::new(msg, next_state)
+        Ok(GeneratedMessage::new(msg, next_state))
     }
 }
 
@@ -353,7 +351,10 @@ struct EmitClientKeyExchange {
     transcript: HandshakeHash,
 }
 impl EmitState for EmitClientKeyExchange {
-    fn generate_message(mut self: Box<Self>) -> GeneratedMessage {
+    fn generate_message(
+        mut self: Box<Self>,
+        _conn: &mut LlConnectionCommon,
+    ) -> Result<GeneratedMessage, Error> {
         let mut buf = Vec::new();
         let ecpoint = PayloadU8::new(Vec::from(self.kx.pub_key()));
         ecpoint.encode(&mut buf);
@@ -369,7 +370,7 @@ impl EmitState for EmitClientKeyExchange {
 
         self.transcript.add_message(&msg);
 
-        let next_state = ConnectionState::intermediate(SetupClientEncryption {
+        let next_state = ConnectionState::emit(EmitChangeCipherSpec {
             kx: self.kx,
             peer_pub_key: self.ecdh_params.public.0,
             randoms: self.randoms,
@@ -377,11 +378,11 @@ impl EmitState for EmitClientKeyExchange {
             transcript: self.transcript,
         });
 
-        GeneratedMessage::new(msg, next_state)
+        Ok(GeneratedMessage::new(msg, next_state))
     }
 }
 
-struct SetupClientEncryption {
+struct EmitChangeCipherSpec {
     kx: Box<dyn ActiveKeyExchange>,
     peer_pub_key: Vec<u8>,
     randoms: ConnectionRandoms,
@@ -389,11 +390,11 @@ struct SetupClientEncryption {
     transcript: HandshakeHash,
 }
 
-impl IntermediateState for SetupClientEncryption {
-    fn next_state(
+impl EmitState for EmitChangeCipherSpec {
+    fn generate_message(
         self: Box<Self>,
         conn: &mut LlConnectionCommon,
-    ) -> Result<ConnectionState, Error> {
+    ) -> Result<GeneratedMessage, Error> {
         let secrets = ConnectionSecrets::from_key_exchange(
             self.kx,
             &self.peer_pub_key,
@@ -410,31 +411,17 @@ impl IntermediateState for SetupClientEncryption {
             .prepare_message_decrypter(dec);
         conn.record_layer.start_encrypting();
 
-        Ok(ConnectionState::emit(EmitChangeCipherSpec {
-            secrets,
-            transcript: self.transcript,
-        })
-        .as_after_encode())
-    }
-}
-
-struct EmitChangeCipherSpec {
-    secrets: ConnectionSecrets,
-    transcript: HandshakeHash,
-}
-impl EmitState for EmitChangeCipherSpec {
-    fn generate_message(self: Box<Self>) -> GeneratedMessage {
         let msg = Message {
             version: ProtocolVersion::TLSv1_2,
             payload: MessagePayload::ChangeCipherSpec(ChangeCipherSpecPayload {}),
         };
 
         let next_state = ConnectionState::emit(EmitFinished {
-            secrets: self.secrets,
+            secrets,
             transcript: self.transcript,
         });
 
-        GeneratedMessage::new(msg, next_state)
+        Ok(GeneratedMessage::new(msg, next_state))
     }
 }
 
@@ -443,7 +430,10 @@ struct EmitFinished {
     transcript: HandshakeHash,
 }
 impl EmitState for EmitFinished {
-    fn generate_message(mut self: Box<Self>) -> GeneratedMessage {
+    fn generate_message(
+        mut self: Box<Self>,
+        _conn: &mut LlConnectionCommon,
+    ) -> Result<GeneratedMessage, Error> {
         let vh = self.transcript.get_current_hash();
         let verify_data = self.secrets.client_verify_data(&vh);
         let verify_data_payload = Payload::new(verify_data);
@@ -458,13 +448,13 @@ impl EmitState for EmitFinished {
 
         self.transcript.add_message(&msg);
 
-        GeneratedMessage::new(
+        Ok(GeneratedMessage::new(
             msg,
             ConnectionState::expect(ExpectChangeCipherSpec {
                 transcript: self.transcript,
             }),
         )
-        .require_encryption(true)
+        .require_encryption(true))
     }
 }
 

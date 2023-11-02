@@ -76,7 +76,10 @@ pub(crate) trait IntermediateState: 'static {
 }
 
 pub(crate) trait EmitState: 'static {
-    fn generate_message(self: Box<Self>) -> GeneratedMessage;
+    fn generate_message(
+        self: Box<Self>,
+        _conn: &mut LlConnectionCommon,
+    ) -> Result<GeneratedMessage, Error>;
 }
 
 /// both `LlClientConnection` and `LlServerConnection` implement `DerefMut<Target = LlConnectionCommon>`
@@ -113,12 +116,14 @@ impl LlConnectionCommon {
                     return Err(err);
                 }
                 ConnectionState::Emit(state) => {
+                    let generated_message = state.generate_message(self)?;
+
                     return self.gen_status(|conn| {
                         State::MustEncodeTlsData(MustEncodeTlsData {
                             conn,
-                            generated_message: state.generate_message(),
+                            generated_message,
                         })
-                    })
+                    });
                 }
 
                 ConnectionState::AfterEncode(next_state) => {
@@ -541,11 +546,14 @@ struct EmitAlert {
 }
 
 impl EmitState for EmitAlert {
-    fn generate_message(self: Box<Self>) -> GeneratedMessage {
-        GeneratedMessage::new(
+    fn generate_message(
+        self: Box<Self>,
+        _conn: &mut LlConnectionCommon,
+    ) -> Result<GeneratedMessage, Error> {
+        Ok(GeneratedMessage::new(
             Message::build_alert(AlertLevel::Fatal, self.description),
             ConnectionState::Poisoned(self.error),
-        )
+        ))
     }
 }
 
