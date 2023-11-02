@@ -149,12 +149,10 @@ impl LlConnectionCommon {
                     return Err(err);
                 }
                 CommonState::Emit(state) => {
-                    let generated_message = state.generate_message();
-
                     return self.gen_status(|conn| {
                         State::MustEncryptTlsData(MustEncryptTlsData {
                             conn,
-                            generated_message,
+                            generated_message: state.generate_message(),
                         })
                     });
                 }
