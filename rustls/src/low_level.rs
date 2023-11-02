@@ -62,7 +62,7 @@ impl ConnectionState {
     }
 }
 
-pub(crate) trait ExpectState: Send + 'static {
+pub(crate) trait ExpectState: 'static {
     fn process_message(self: Box<Self>, msg: Message) -> Result<ConnectionState, Error>;
 
     fn get_transcript_mut(&mut self) -> Option<&mut HandshakeHash> {
@@ -70,12 +70,12 @@ pub(crate) trait ExpectState: Send + 'static {
     }
 }
 
-pub(crate) trait IntermediateState: Send + 'static {
+pub(crate) trait IntermediateState: 'static {
     fn next_state(self: Box<Self>, conn: &mut LlConnectionCommon)
         -> Result<ConnectionState, Error>;
 }
 
-pub(crate) trait EmitState: Send + 'static {
+pub(crate) trait EmitState: 'static {
     fn generate_message(self: Box<Self>) -> GeneratedMessage;
 }
 
