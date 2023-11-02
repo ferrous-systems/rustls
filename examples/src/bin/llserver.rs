@@ -78,8 +78,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     match state {
                         // logic similar to the one presented in the 'handling InsufficientSizeError' section is
                         // used in these states
-                        State::MustEncryptTlsData(mut state) => {
-                            let written = match state.encrypt(&mut outgoing_tls[outgoing_used..]) {
+                        State::MustEncodeTlsData(mut state) => {
+                            let written = match state.encode(&mut outgoing_tls[outgoing_used..]) {
                                 Ok(written) => written,
                                 Err(EncryptError::InsufficientSize(InsufficientSizeError {
                                     required_size,
@@ -90,7 +90,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                                     // don't forget to encrypt the handshake record after resizing!
                                     state
-                                        .encrypt(&mut outgoing_tls[outgoing_used..])
+                                        .encode(&mut outgoing_tls[outgoing_used..])
                                         .expect("should not fail this time")
                                 }
                                 Err(err) => return Err(err.into()),

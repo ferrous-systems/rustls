@@ -112,7 +112,7 @@ impl LlConnectionCommon {
                 }
                 ConnectionState::Emit(state) => {
                     return self.gen_status(|conn| {
-                        State::MustEncryptTlsData(MustEncryptTlsData {
+                        State::MustEncodeTlsData(MustEncodeTlsData {
                             conn,
                             generated_message: state.generate_message(),
                         })
@@ -292,8 +292,8 @@ pub enum State<'c, 'i> {
     /// One, or more, application data record is available
     AppDataAvailable(AppDataAvailable<'c, 'i>),
 
-    /// A Handshake record must be encrypted into the `outgoing_tls` buffer
-    MustEncryptTlsData(MustEncryptTlsData<'c>),
+    /// A Handshake record must be encoded into the `outgoing_tls` buffer
+    MustEncodeTlsData(MustEncodeTlsData<'c>),
 
     /// TLS records related to the handshake have been placed in the `outgoing_tls` buffer and must
     /// be transmitted to continue with the handshake process
@@ -411,7 +411,7 @@ pub struct InsufficientSizeError {
 }
 
 /// FIXME: docs
-pub struct MustEncryptTlsData<'c> {
+pub struct MustEncodeTlsData<'c> {
     /// FIXME: docs
     conn: &'c mut LlConnectionCommon,
     generated_message: GeneratedMessage,
@@ -444,12 +444,12 @@ impl core::fmt::Display for EncryptError {
 
 impl std::error::Error for EncryptError {}
 
-impl<'c> MustEncryptTlsData<'c> {
-    /// Encrypts a handshake record into the `outgoing_tls` buffer
+impl<'c> MustEncodeTlsData<'c> {
+    /// Encodes a handshake record into the `outgoing_tls` buffer
     ///
     /// returns the number of bytes that were written into `outgoing_tls`, or an error if
     /// the provided buffer was too small. in the error case, `outgoing_tls` is not modified
-    pub fn encrypt(&mut self, outgoing_tls: &mut [u8]) -> Result<usize, EncryptError> {
+    pub fn encode(&mut self, outgoing_tls: &mut [u8]) -> Result<usize, EncryptError> {
         let message_fragmenter = MessageFragmenter::default();
         let GeneratedMessage {
             ref plain_msg,

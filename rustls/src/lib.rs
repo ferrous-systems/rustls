@@ -440,10 +440,10 @@ pub mod client {
     mod common;
     pub(super) mod handy;
     mod hs;
+    pub mod low_level;
     #[cfg(feature = "tls12")]
     mod tls12;
     mod tls13;
-    pub mod low_level;
 
     pub use crate::dns_name::InvalidDnsNameError;
     pub use builder::WantsClientCert;
@@ -477,11 +477,11 @@ pub mod server {
     mod common;
     pub(crate) mod handy;
     mod hs;
+    pub mod low_level;
     mod server_conn;
     #[cfg(feature = "tls12")]
     mod tls12;
     mod tls13;
-    pub mod low_level;
 
     pub use crate::verify::NoClientAuth;
     pub use crate::webpki::WebPkiClientVerifier;
