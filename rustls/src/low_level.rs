@@ -40,9 +40,11 @@ pub(crate) struct GeneratedMessage {
 }
 
 impl GeneratedMessage {
-    pub(crate) fn new(plain_msg: impl Into<PlainMessage>, next_state: CommonState) -> Self {
+    pub(crate) fn new(msg: Message, next_state: CommonState) -> Self {
+        log_msg(&msg, false);
+
         Self {
-            plain_msg: plain_msg.into(),
+            plain_msg: msg.into(),
             needs_encryption: false,
             skip_index: 0,
             next_state,
@@ -51,11 +53,6 @@ impl GeneratedMessage {
 
     pub(crate) fn require_encryption(mut self, needs_encryption: bool) -> Self {
         self.needs_encryption = needs_encryption;
-        self
-    }
-
-    pub(crate) fn skip(mut self, index: usize) -> Self {
-        self.skip_index = index;
         self
     }
 }
@@ -92,21 +89,6 @@ impl EmitState for EmitAlert {
             Message::build_alert(AlertLevel::Fatal, self.description),
             CommonState::AfterEmit(Box::new(CommonState::Poisoned(self.error))),
         )
-    }
-}
-
-pub(crate) struct RetryEmit {
-    plain_msg: PlainMessage,
-    index: usize,
-    needs_encryption: bool,
-    next_state: Box<CommonState>,
-}
-
-impl EmitState for RetryEmit {
-    fn generate_message(self: Box<Self>) -> GeneratedMessage {
-        GeneratedMessage::new(self.plain_msg, *self.next_state)
-            .skip(self.index)
-            .require_encryption(self.needs_encryption)
     }
 }
 
