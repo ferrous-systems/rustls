@@ -87,9 +87,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             State::TrafficTransit(mut traffic_transit) => {
                 // post-handshake logic
-                let req = b"GET / HTTP/1.0\r\nHost: llclient\r\nConnection: close\r\nAccept-Encoding: identity\r\n\r\n";
-                let len = traffic_transit.encrypt(req, outgoing_tls.as_mut_slice())?;
-                sock.write_all(&outgoing_tls[..len])?;
+                let mut req = b"GET / HTTP/1.0\r\nHost: llclient\r\nConnection: close\r\nAccept-Encoding: identity\r\n\r\n".to_vec();
+                req.extend_from_slice([b' '; 81].as_slice());
+
+                let written =
+                    match traffic_transit.encrypt(&req, &mut outgoing_tls[outgoing_used..]) {
+                        Ok(written) => written,
+                        Err(InsufficientSizeError { required_size }) => {
+                            let new_len = outgoing_used + required_size;
+                            outgoing_tls.resize(new_len, 0);
+                            eprintln!("resized `outgoing_tls` buffer to {}B", new_len);
+
+                            // don't forget to encode the request after resizing!
+                            traffic_transit
+                                .encrypt(&req, &mut outgoing_tls[outgoing_used..])
+                                .expect("should not fail this time")
+                        }
+                    };
+
+                outgoing_used += written;
+                sock.write_all(&outgoing_tls[..outgoing_used])?;
 
                 let read = sock.read(&mut incoming_tls[incoming_used..])?;
                 incoming_used += read;

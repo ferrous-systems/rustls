@@ -140,9 +140,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 connection, host
                             );
 
-                            let len = traffic_transit
-                                .encrypt(resp.as_bytes(), outgoing_tls.as_mut_slice())?;
-                            stream.write_all(&outgoing_tls[..len])?;
+                            let written = match traffic_transit
+                                .encrypt(resp.as_bytes(), &mut outgoing_tls[outgoing_used..])
+                            {
+                                Ok(written) => written,
+                                Err(InsufficientSizeError { required_size }) => {
+                                    let new_len = outgoing_used + required_size;
+                                    outgoing_tls.resize(new_len, 0);
+                                    eprintln!("resized `outgoing_tls` buffer to {}B", new_len);
+
+                                    // don't forget to encode the request after resizing!
+                                    traffic_transit
+                                        .encrypt(
+                                            resp.as_bytes(),
+                                            &mut outgoing_tls[outgoing_used..],
+                                        )
+                                        .expect("should not fail this time")
+                                }
+                            };
+
+                            outgoing_used += written;
+                            stream.write_all(&outgoing_tls[..outgoing_used])?;
                         }
 
                         State::ConnectionClosed => open_connection = false,

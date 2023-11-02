@@ -165,6 +165,13 @@ impl OpaqueMessage {
         buf
     }
 
+    pub(crate) fn encoded_len(payload_len: usize) -> usize {
+        core::mem::size_of::<u8>() + // length of `typ`
+        core::mem::size_of::<u16>() + // length of `version`
+        core::mem::size_of::<u16>() + // length of `payload.0.len() as u16`
+        payload_len
+    }
+
     /// Force conversion into a plaintext message.
     ///
     /// This should only be used for messages that are known to be in plaintext. Otherwise, the

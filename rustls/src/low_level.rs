@@ -234,26 +234,6 @@ impl LlConnectionCommon {
         Ok(written_bytes)
     }
 
-    fn encrypt_traffic_transit(
-        &mut self,
-        application_data: &[u8],
-        outgoing_tls: &mut [u8],
-    ) -> Result<usize, EncodeError> {
-        let msg: PlainMessage = Message {
-            version: ProtocolVersion::TLSv1_2,
-            payload: MessagePayload::ApplicationData(Payload(application_data.to_vec())),
-        }
-        .into();
-
-        let opaque_msg = self
-            .record_layer
-            .encrypt_outgoing(msg.borrow());
-
-        let bytes = opaque_msg.encode();
-        outgoing_tls[..bytes.len()].copy_from_slice(&bytes);
-        Ok(bytes.len())
-    }
-
     fn read_message(
         &mut self,
         incoming_tls: &[u8],
@@ -543,9 +523,59 @@ impl<'c> TrafficTransit<'c> {
         &mut self,
         application_data: &[u8],
         outgoing_tls: &mut [u8],
-    ) -> Result<usize, EncodeError> {
-        self.conn
-            .encrypt_traffic_transit(application_data, outgoing_tls)
+    ) -> Result<usize, InsufficientSizeError> {
+        let msg = PlainMessage::from(Message {
+            version: ProtocolVersion::TLSv1_2,
+            payload: MessagePayload::ApplicationData(Payload(application_data.to_vec())),
+        });
+
+        let max_frag = self
+            .conn
+            .message_fragmenter
+            .get_max_fragment_size();
+
+        let payload_len = msg.payload.0.len();
+
+        let num_frags = payload_len / max_frag;
+        let rem_len = payload_len % max_frag;
+
+        let encrypted_max_frag = self
+            .conn
+            .record_layer
+            .encrypted_len(max_frag);
+        let encrypted_rem_len = self
+            .conn
+            .record_layer
+            .encrypted_len(rem_len);
+
+        let required_size = num_frags * encrypted_max_frag + encrypted_rem_len;
+
+        if required_size > outgoing_tls.len() {
+            return Err(InsufficientSizeError { required_size });
+        }
+
+        let mut written_bytes = 0;
+
+        for m in self
+            .conn
+            .message_fragmenter
+            .fragment_message(&msg)
+        {
+            let opaque_msg = self
+                .conn
+                .record_layer
+                .encrypt_outgoing(m);
+
+            let bytes = opaque_msg.encode();
+            assert_eq!(bytes.len(), encrypted_rem_len);
+
+            outgoing_tls[written_bytes..written_bytes + bytes.len()].copy_from_slice(&bytes);
+            written_bytes += bytes.len();
+        }
+
+        debug_assert_eq!(required_size, written_bytes);
+
+        Ok(written_bytes)
     }
 }
 

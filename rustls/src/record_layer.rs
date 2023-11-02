@@ -116,6 +116,13 @@ impl RecordLayer {
             .unwrap()
     }
 
+    pub(crate) fn encrypted_len(&self, payload_len: usize) -> usize {
+        OpaqueMessage::encoded_len(
+            self.message_encrypter
+                .encrypted_payload_len(payload_len),
+        )
+    }
+
     /// Prepare to use the given `MessageEncrypter` for future message encryption.
     /// It is not used until you call `start_encrypting`.
     pub(crate) fn prepare_message_encrypter(&mut self, cipher: Box<dyn MessageEncrypter>) {

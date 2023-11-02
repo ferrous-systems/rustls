@@ -132,6 +132,8 @@ pub trait MessageEncrypter: Send + Sync {
     /// Encrypt the given TLS message `msg`, using the sequence number
     /// `seq which can be used to derive a unique [`Nonce`].
     fn encrypt(&self, msg: BorrowedPlainMessage, seq: u64) -> Result<OpaqueMessage, Error>;
+    /// FIXME: docs
+    fn encrypted_payload_len(&self, payload_len: usize) -> usize;
 }
 
 impl dyn MessageEncrypter {
@@ -299,6 +301,10 @@ struct InvalidMessageEncrypter {}
 impl MessageEncrypter for InvalidMessageEncrypter {
     fn encrypt(&self, _m: BorrowedPlainMessage, _seq: u64) -> Result<OpaqueMessage, Error> {
         Err(Error::EncryptError)
+    }
+
+    fn encrypted_payload_len(&self, payload_len: usize) -> usize {
+        payload_len
     }
 }
 

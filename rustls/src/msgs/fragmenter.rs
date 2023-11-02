@@ -30,6 +30,10 @@ impl MessageFragmenter {
         self.fragment_slice(msg.typ, msg.version, &msg.payload.0)
     }
 
+    pub(crate) fn get_max_fragment_size(&self) -> usize {
+        self.max_frag
+    }
+
     /// Enqueue borrowed fragments of (version, typ, payload) which
     /// are no longer than max_frag onto the `out` deque.
     pub(crate) fn fragment_slice<'a>(
