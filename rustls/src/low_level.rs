@@ -22,81 +22,6 @@ use crate::{
 };
 use crate::{AlertDescription, ContentType, InvalidMessage};
 
-fn log_msg(msg: &Message, read: bool) {
-    let verb = if read { "Read" } else { "Emit" };
-    match &msg.payload {
-        MessagePayload::Handshake {
-            parsed: HandshakeMessagePayload { typ, .. },
-            ..
-        } => std::println!("{} Handshake::{:?}", verb, typ),
-        payload => std::println!("{} {:?}", verb, payload.content_type()),
-    };
-}
-
-pub(crate) struct GeneratedMessage {
-    plain_msg: PlainMessage,
-    needs_encryption: bool,
-    skip_index: usize,
-    next_state: CommonState,
-}
-
-impl GeneratedMessage {
-    pub(crate) fn new(msg: Message, next_state: CommonState) -> Self {
-        log_msg(&msg, false);
-
-        Self {
-            plain_msg: msg.into(),
-            needs_encryption: false,
-            skip_index: 0,
-            next_state,
-        }
-    }
-
-    pub(crate) fn require_encryption(mut self, needs_encryption: bool) -> Self {
-        self.needs_encryption = needs_encryption;
-        self
-    }
-}
-
-pub(crate) trait ExpectState: Send + 'static {
-    fn process_message(self: Box<Self>, msg: Message) -> Result<CommonState, Error>;
-
-    fn get_transcript_mut(&mut self) -> Option<&mut HandshakeHash> {
-        None
-    }
-}
-
-pub(crate) trait EmitState: Send + 'static {
-    fn generate_message(self: Box<Self>) -> GeneratedMessage;
-}
-
-pub(crate) struct EmitAlert {
-    description: AlertDescription,
-    error: Error,
-}
-
-impl EmitAlert {
-    pub(crate) fn new(description: AlertDescription, error: impl Into<Error>) -> Self {
-        Self {
-            description,
-            error: error.into(),
-        }
-    }
-}
-
-impl EmitState for EmitAlert {
-    fn generate_message(self: Box<Self>) -> GeneratedMessage {
-        GeneratedMessage::new(
-            Message::build_alert(AlertLevel::Fatal, self.description),
-            CommonState::AfterEmit(Box::new(CommonState::Poisoned(self.error))),
-        )
-    }
-}
-
-pub(crate) trait IntermediateState: 'static + Send {
-    fn next_state(self: Box<Self>, common: &mut LlConnectionCommon) -> Result<CommonState, Error>;
-}
-
 pub(crate) enum CommonState {
     Unreachable,
     Expect(Box<dyn ExpectState>),
@@ -112,6 +37,22 @@ impl CommonState {
     fn take(&mut self) -> Self {
         core::mem::replace(self, Self::Unreachable)
     }
+}
+
+pub(crate) trait ExpectState: Send + 'static {
+    fn process_message(self: Box<Self>, msg: Message) -> Result<CommonState, Error>;
+
+    fn get_transcript_mut(&mut self) -> Option<&mut HandshakeHash> {
+        None
+    }
+}
+
+pub(crate) trait IntermediateState: Send + 'static {
+    fn next_state(self: Box<Self>, common: &mut LlConnectionCommon) -> Result<CommonState, Error>;
+}
+
+pub(crate) trait EmitState: Send + 'static {
+    fn generate_message(self: Box<Self>) -> GeneratedMessage;
 }
 
 /// both `LlClientConnection` and `LlServerConnection` implement `DerefMut<Target = LlConnectionCommon>`
@@ -565,4 +506,63 @@ impl<'c> TrafficTransit<'c> {
         self.conn
             .encrypt_traffic_transit(application_data, outgoing_tls)
     }
+}
+
+pub(crate) struct EmitAlert {
+    description: AlertDescription,
+    error: Error,
+}
+
+impl EmitAlert {
+    pub(crate) fn new(description: AlertDescription, error: impl Into<Error>) -> Self {
+        Self {
+            description,
+            error: error.into(),
+        }
+    }
+}
+
+impl EmitState for EmitAlert {
+    fn generate_message(self: Box<Self>) -> GeneratedMessage {
+        GeneratedMessage::new(
+            Message::build_alert(AlertLevel::Fatal, self.description),
+            CommonState::AfterEmit(Box::new(CommonState::Poisoned(self.error))),
+        )
+    }
+}
+
+pub(crate) struct GeneratedMessage {
+    plain_msg: PlainMessage,
+    needs_encryption: bool,
+    skip_index: usize,
+    next_state: CommonState,
+}
+
+impl GeneratedMessage {
+    pub(crate) fn new(msg: Message, next_state: CommonState) -> Self {
+        log_msg(&msg, false);
+
+        Self {
+            plain_msg: msg.into(),
+            needs_encryption: false,
+            skip_index: 0,
+            next_state,
+        }
+    }
+
+    pub(crate) fn require_encryption(mut self, needs_encryption: bool) -> Self {
+        self.needs_encryption = needs_encryption;
+        self
+    }
+}
+
+fn log_msg(msg: &Message, read: bool) {
+    let verb = if read { "Read" } else { "Emit" };
+    match &msg.payload {
+        MessagePayload::Handshake {
+            parsed: HandshakeMessagePayload { typ, .. },
+            ..
+        } => std::println!("{} Handshake::{:?}", verb, typ),
+        payload => std::println!("{} {:?}", verb, payload.content_type()),
+    };
 }
