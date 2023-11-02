@@ -22,7 +22,7 @@ use crate::{
 };
 use crate::{AlertDescription, ContentType, InvalidMessage};
 
-pub(crate) enum CommonState {
+pub(crate) enum ConnectionState {
     Unreachable,
     Expect(Box<dyn ExpectState>),
     Emit(Box<dyn EmitState>),
@@ -33,7 +33,7 @@ pub(crate) enum CommonState {
     ConnectionClosed,
 }
 
-impl CommonState {
+impl ConnectionState {
     fn take(&mut self) -> Self {
         core::mem::replace(self, Self::Unreachable)
     }
@@ -63,7 +63,7 @@ impl CommonState {
 }
 
 pub(crate) trait ExpectState: Send + 'static {
-    fn process_message(self: Box<Self>, msg: Message) -> Result<CommonState, Error>;
+    fn process_message(self: Box<Self>, msg: Message) -> Result<ConnectionState, Error>;
 
     fn get_transcript_mut(&mut self) -> Option<&mut HandshakeHash> {
         None
@@ -71,7 +71,8 @@ pub(crate) trait ExpectState: Send + 'static {
 }
 
 pub(crate) trait IntermediateState: Send + 'static {
-    fn next_state(self: Box<Self>, conn: &mut LlConnectionCommon) -> Result<CommonState, Error>;
+    fn next_state(self: Box<Self>, conn: &mut LlConnectionCommon)
+        -> Result<ConnectionState, Error>;
 }
 
 pub(crate) trait EmitState: Send + 'static {
@@ -80,14 +81,14 @@ pub(crate) trait EmitState: Send + 'static {
 
 /// both `LlClientConnection` and `LlServerConnection` implement `DerefMut<Target = LlConnectionCommon>`
 pub struct LlConnectionCommon {
-    pub(crate) state: CommonState,
+    pub(crate) state: ConnectionState,
     pub(crate) record_layer: RecordLayer,
     pub(crate) offset: usize,
 }
 
 impl LlConnectionCommon {
     /// FIXME: docs
-    pub(crate) fn new(state: CommonState) -> Result<Self, Error> {
+    pub(crate) fn new(state: ConnectionState) -> Result<Self, Error> {
         Ok(Self {
             state,
             record_layer: RecordLayer::new(),
@@ -102,14 +103,14 @@ impl LlConnectionCommon {
     ) -> Result<Status<'c, 'i>, Error> {
         loop {
             match self.state.take() {
-                CommonState::Unreachable => unreachable!(),
-                CommonState::ConnectionClosed => {
+                ConnectionState::Unreachable => unreachable!(),
+                ConnectionState::ConnectionClosed => {
                     return self.gen_status(|_| State::ConnectionClosed)
                 }
-                CommonState::Poisoned(err) => {
+                ConnectionState::Poisoned(err) => {
                     return Err(err);
                 }
-                CommonState::Emit(state) => {
+                ConnectionState::Emit(state) => {
                     return self.gen_status(|conn| {
                         State::MustEncryptTlsData(MustEncryptTlsData {
                             conn,
@@ -118,7 +119,7 @@ impl LlConnectionCommon {
                     })
                 }
 
-                CommonState::AfterEmit(next_state) => {
+                ConnectionState::AfterEmit(next_state) => {
                     return self.gen_status(|conn| {
                         State::MustTransmitTlsData(MustTransmitTlsData {
                             conn,
@@ -126,12 +127,12 @@ impl LlConnectionCommon {
                         })
                     });
                 }
-                CommonState::Expect(mut curr_state) => {
+                ConnectionState::Expect(mut curr_state) => {
                     let transcript = curr_state.get_transcript_mut();
                     let message = match self.read_message(incoming_tls, transcript) {
                         Ok(message) => message,
                         Err(Error::InvalidMessage(InvalidMessage::MessageTooShort)) => {
-                            self.state = CommonState::Expect(curr_state);
+                            self.state = ConnectionState::Expect(curr_state);
 
                             return self
                                 .gen_status(|_| State::NeedsMoreTlsData { num_bytes: None });
@@ -140,15 +141,15 @@ impl LlConnectionCommon {
                     };
 
                     if let MessagePayload::Alert(alert) = message.payload {
-                        self.handle_alert(alert, CommonState::Expect(curr_state))?;
+                        self.handle_alert(alert, ConnectionState::Expect(curr_state))?;
                     } else {
                         self.state = curr_state.process_message(message)?;
                     };
                 }
-                CommonState::Intermediate(state) => {
+                ConnectionState::Intermediate(state) => {
                     self.state = state.next_state(self)?;
                 }
-                state @ CommonState::HandshakeDone => {
+                state @ ConnectionState::HandshakeDone => {
                     let mut reader = Reader::init(&incoming_tls[self.offset..]);
                     match OpaqueMessage::read(&mut reader) {
                         Ok(msg) => match msg.typ {
@@ -171,7 +172,7 @@ impl LlConnectionCommon {
                                     unreachable!()
                                 };
 
-                                self.handle_alert(alert, CommonState::HandshakeDone)?;
+                                self.handle_alert(alert, ConnectionState::HandshakeDone)?;
                             }
 
                             content_type => {
@@ -255,15 +256,15 @@ impl LlConnectionCommon {
     fn handle_alert(
         &mut self,
         alert: AlertMessagePayload,
-        curr_state: CommonState,
+        curr_state: ConnectionState,
     ) -> Result<(), Error> {
         self.state = if let AlertLevel::Unknown(_) = alert.level {
-            CommonState::emit_alert(
+            ConnectionState::emit_alert(
                 AlertDescription::IllegalParameter,
                 Error::AlertReceived(alert.description),
             )
         } else if alert.description == AlertDescription::CloseNotify {
-            CommonState::ConnectionClosed
+            ConnectionState::ConnectionClosed
         } else if alert.level == AlertLevel::Warning {
             std::println!("TLS alert warning received: {:#?}", alert);
             curr_state
@@ -500,7 +501,7 @@ pub struct MustTransmitTlsData<'c> {
     /// FIXME: docs
     conn: &'c mut LlConnectionCommon,
     /// FIXME: docs
-    next_state: CommonState,
+    next_state: ConnectionState,
 }
 
 impl<'c> MustTransmitTlsData<'c> {
@@ -540,7 +541,7 @@ impl EmitState for EmitAlert {
     fn generate_message(self: Box<Self>) -> GeneratedMessage {
         GeneratedMessage::new(
             Message::build_alert(AlertLevel::Fatal, self.description),
-            CommonState::Poisoned(self.error),
+            ConnectionState::Poisoned(self.error),
         )
     }
 }
@@ -549,11 +550,11 @@ pub(crate) struct GeneratedMessage {
     plain_msg: PlainMessage,
     needs_encryption: bool,
     skip_index: usize,
-    next_state: CommonState,
+    next_state: ConnectionState,
 }
 
 impl GeneratedMessage {
-    pub(crate) fn new(msg: Message, next_state: CommonState) -> Self {
+    pub(crate) fn new(msg: Message, next_state: ConnectionState) -> Self {
         log_msg(&msg, false);
 
         Self {

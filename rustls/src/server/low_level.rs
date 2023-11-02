@@ -23,7 +23,7 @@ use crate::server::common::ActiveCertifiedKey;
 use crate::server::{hs, ClientHello};
 use crate::sign::CertifiedKey;
 use crate::{
-    low_level::{CommonState, ExpectState, LlConnectionCommon},
+    low_level::{ConnectionState, ExpectState, LlConnectionCommon},
     msgs::{
         enums::Compression,
         handshake::{ConvertServerNameList, HandshakePayload},
@@ -59,7 +59,7 @@ impl LlServerConnection {
     /// FIXME: docs
     pub fn new(config: Arc<ServerConfig>) -> Result<Self, Error> {
         Ok(Self {
-            conn: LlConnectionCommon::new(CommonState::expect(ExpectClientHello { config }))?,
+            conn: LlConnectionCommon::new(ConnectionState::expect(ExpectClientHello { config }))?,
         })
     }
 }
@@ -69,7 +69,7 @@ struct ExpectClientHello {
 }
 
 impl ExpectState for ExpectClientHello {
-    fn process_message(self: Box<Self>, msg: Message) -> Result<CommonState, Error> {
+    fn process_message(self: Box<Self>, msg: Message) -> Result<ConnectionState, Error> {
         let client_hello = require_handshake_msg!(
             msg,
             HandshakeType::ClientHello,
@@ -80,14 +80,14 @@ impl ExpectState for ExpectClientHello {
             .compression_methods
             .contains(&Compression::Null)
         {
-            return Ok(CommonState::emit_alert(
+            return Ok(ConnectionState::emit_alert(
                 AlertDescription::IllegalParameter,
                 PeerIncompatible::NullCompressionRequired,
             ));
         }
 
         if client_hello.has_duplicate_extension() {
-            return Ok(CommonState::emit_alert(
+            return Ok(ConnectionState::emit_alert(
                 AlertDescription::DecodeError,
                 PeerMisbehaved::DuplicateClientHelloExtensions,
             ));
@@ -96,14 +96,14 @@ impl ExpectState for ExpectClientHello {
         let _sni: Option<DnsName> = match client_hello.get_sni_extension() {
             Some(sni) => {
                 if sni.has_duplicate_names_for_type() {
-                    return Ok(CommonState::emit_alert(
+                    return Ok(ConnectionState::emit_alert(
                         AlertDescription::DecodeError,
                         PeerMisbehaved::DuplicateServerNameTypes,
                     ));
                 }
 
                 let Some(hostname) = sni.get_single_hostname() else {
-                    return Ok(CommonState::emit_alert(
+                    return Ok(ConnectionState::emit_alert(
                         AlertDescription::IllegalParameter,
                         PeerMisbehaved::ServerNameMustContainOneHostName,
                     ));
@@ -115,7 +115,7 @@ impl ExpectState for ExpectClientHello {
         };
 
         let Some(sig_schemes) = client_hello.get_sigalgs_extension() else {
-            return Ok(CommonState::emit_alert(
+            return Ok(ConnectionState::emit_alert(
                 AlertDescription::HandshakeFailure,
                 PeerIncompatible::SignatureAlgorithmsExtensionRequired,
             ));
@@ -130,7 +130,7 @@ impl ExpectState for ExpectClientHello {
         let maybe_versions_ext = client_hello.get_versions_extension();
         let version = if let Some(versions) = maybe_versions_ext {
             if !versions.contains(&ProtocolVersion::TLSv1_2) || !tls12_enabled {
-                return Ok(CommonState::emit_alert(
+                return Ok(ConnectionState::emit_alert(
                     AlertDescription::ProtocolVersion,
                     PeerIncompatible::Tls12NotOfferedOrEnabled,
                 ));
@@ -138,7 +138,7 @@ impl ExpectState for ExpectClientHello {
                 ProtocolVersion::TLSv1_2
             }
         } else if client_hello.client_version.get_u16() < ProtocolVersion::TLSv1_2.get_u16() {
-            return Ok(CommonState::emit_alert(
+            return Ok(ConnectionState::emit_alert(
                 AlertDescription::ProtocolVersion,
                 PeerIncompatible::Tls12NotOffered,
             ));
@@ -175,7 +175,7 @@ impl ExpectState for ExpectClientHello {
                 .cert_resolver
                 .resolve(client_hello)
             else {
-                return Ok(CommonState::emit_alert(
+                return Ok(ConnectionState::emit_alert(
                     AlertDescription::AccessDenied,
                     Error::General("no server certificate chain resolved".to_owned()),
                 ));
@@ -209,7 +209,7 @@ impl ExpectState for ExpectClientHello {
         };
 
         let Some(suite) = suite else {
-            return Ok(CommonState::emit_alert(
+            return Ok(ConnectionState::emit_alert(
                 AlertDescription::HandshakeFailure,
                 PeerIncompatible::NoCipherSuitesInCommon,
             ));
@@ -234,21 +234,21 @@ impl ExpectState for ExpectClientHello {
         let using_ems = client_hello.ems_support_offered();
 
         let Some(groups_ext) = client_hello.get_namedgroups_extension() else {
-            return Ok(CommonState::emit_alert(
+            return Ok(ConnectionState::emit_alert(
                 AlertDescription::HandshakeFailure,
                 PeerIncompatible::NamedGroupsExtensionRequired,
             ));
         };
 
         let Some(ecpoints_ext) = client_hello.get_ecpoints_extension() else {
-            return Ok(CommonState::emit_alert(
+            return Ok(ConnectionState::emit_alert(
                 AlertDescription::HandshakeFailure,
                 PeerIncompatible::EcPointsExtensionRequired,
             ));
         };
 
         if !ecpoints_ext.contains(&ECPointFormat::Uncompressed) {
-            return Ok(CommonState::emit_alert(
+            return Ok(ConnectionState::emit_alert(
                 AlertDescription::IllegalParameter,
                 PeerIncompatible::UncompressedEcPointsRequired,
             ));
@@ -258,7 +258,7 @@ impl ExpectState for ExpectClientHello {
         let sigschemes = suite.resolve_sig_schemes(&sig_schemes);
 
         if sigschemes.is_empty() {
-            return Ok(CommonState::emit_alert(
+            return Ok(ConnectionState::emit_alert(
                 AlertDescription::HandshakeFailure,
                 PeerIncompatible::NoSignatureSchemesInCommon,
             ));
@@ -271,7 +271,7 @@ impl ExpectState for ExpectClientHello {
             .find(|skxg| groups_ext.contains(&skxg.name()))
             .cloned()
         else {
-            return Ok(CommonState::emit_alert(
+            return Ok(ConnectionState::emit_alert(
                 AlertDescription::HandshakeFailure,
                 PeerIncompatible::NoKxGroupsInCommon,
             ));
@@ -282,7 +282,7 @@ impl ExpectState for ExpectClientHello {
             .find(|format| ecpoints_ext.contains(format))
             .cloned()
         else {
-            return Ok(CommonState::emit_alert(
+            return Ok(ConnectionState::emit_alert(
                 AlertDescription::HandshakeFailure,
                 PeerIncompatible::NoEcPointFormatsInCommon,
             ));
@@ -315,13 +315,13 @@ impl ExpectState for ExpectClientHello {
             vec![],
         ) {
             return match opt_desc {
-                Some(desc) => Ok(CommonState::emit_alert(desc, err)),
+                Some(desc) => Ok(ConnectionState::emit_alert(desc, err)),
                 None => Err(err),
             };
         }
         ep.process_tls12(&self.config, client_hello, using_ems);
 
-        Ok(CommonState::emit(EmitServerHello {
+        Ok(ConnectionState::emit(EmitServerHello {
             session_id,
             transcript,
             randoms,
@@ -366,7 +366,7 @@ impl EmitState for EmitServerHello {
 
         GeneratedMessage::new(
             sh,
-            CommonState::emit(EmitCertificate {
+            ConnectionState::emit(EmitCertificate {
                 transcript: self.transcript,
                 certkey: self.certkey,
                 randoms: self.randoms,
@@ -403,13 +403,13 @@ impl EmitState for EmitCertificate {
 
         GeneratedMessage::new(
             c,
-            CommonState::intermediate(PrepareKeyExchange {
+            ConnectionState::intermediate(PrepareKeyExchange {
                 transcript: self.transcript,
                 certkey: self.certkey,
                 sigschemes: self.sigschemes,
                 randoms: self.randoms,
                 selected_group: self.selected_group,
-            })
+            }),
         )
     }
 }
@@ -423,7 +423,10 @@ struct PrepareKeyExchange {
 }
 
 impl IntermediateState for PrepareKeyExchange {
-    fn next_state(self: Box<Self>, _conn: &mut LlConnectionCommon) -> Result<CommonState, Error> {
+    fn next_state(
+        self: Box<Self>,
+        _conn: &mut LlConnectionCommon,
+    ) -> Result<ConnectionState, Error> {
         let kx = self
             .selected_group
             .start()
@@ -442,7 +445,7 @@ impl IntermediateState for PrepareKeyExchange {
         let sigscheme = signer.scheme();
         let sig = signer.sign(&msg)?;
 
-        Ok(CommonState::emit(EmitServerKeyExchange {
+        Ok(ConnectionState::emit(EmitServerKeyExchange {
             transcript: self.transcript,
             sigscheme,
             sig,
@@ -475,6 +478,6 @@ impl EmitState for EmitServerKeyExchange {
 
         self.transcript.add_message(&m);
 
-        GeneratedMessage::new(m, CommonState::Unreachable)
+        GeneratedMessage::new(m, ConnectionState::Unreachable)
     }
 }
