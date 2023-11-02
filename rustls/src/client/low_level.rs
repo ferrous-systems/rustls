@@ -414,7 +414,7 @@ impl IntermediateState for SetupClientEncryption {
             secrets,
             transcript: self.transcript,
         })
-        .as_after_emit())
+        .as_after_encode())
     }
 }
 

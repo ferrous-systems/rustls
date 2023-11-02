@@ -26,7 +26,7 @@ pub(crate) enum ConnectionState {
     Unreachable,
     Expect(Box<dyn ExpectState>),
     Emit(Box<dyn EmitState>),
-    AfterEmit(Box<Self>),
+    AfterEncode(Box<Self>),
     Intermediate(Box<dyn IntermediateState>),
     HandshakeDone,
     Poisoned(Error),
@@ -57,8 +57,8 @@ impl ConnectionState {
         Self::Intermediate(Box::new(state))
     }
 
-    pub(crate) fn as_after_emit(self) -> Self {
-        Self::AfterEmit(Box::new(self))
+    pub(crate) fn as_after_encode(self) -> Self {
+        Self::AfterEncode(Box::new(self))
     }
 }
 
@@ -119,7 +119,7 @@ impl LlConnectionCommon {
                     })
                 }
 
-                ConnectionState::AfterEmit(next_state) => {
+                ConnectionState::AfterEncode(next_state) => {
                     return self.gen_status(|conn| {
                         State::MustTransmitTlsData(MustTransmitTlsData {
                             conn,
@@ -561,7 +561,7 @@ impl GeneratedMessage {
             plain_msg: msg.into(),
             needs_encryption: false,
             skip_index: 0,
-            next_state: next_state.as_after_emit(),
+            next_state: next_state.as_after_encode(),
         }
     }
 
