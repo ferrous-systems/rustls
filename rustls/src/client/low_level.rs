@@ -12,8 +12,7 @@ use crate::conn::ConnectionRandoms;
 use crate::crypto::ActiveKeyExchange;
 use crate::hash_hs::{HandshakeHash, HandshakeHashBuffer};
 use crate::low_level::{
-    ConnectionState, EmitState, ExpectState, GeneratedMessage, IntermediateState,
-    LlConnectionCommon,
+    ConnectionState, EmitState, ExpectState, GeneratedMessage, LlConnectionCommon,
 };
 use crate::msgs::base::{Payload, PayloadU8};
 use crate::msgs::ccs::ChangeCipherSpecPayload;
@@ -142,7 +141,11 @@ struct ExpectServerHello {
 }
 
 impl ExpectState for ExpectServerHello {
-    fn process_message(self: Box<Self>, msg: Message) -> Result<ConnectionState, Error> {
+    fn process_message(
+        self: Box<Self>,
+        _conn: &mut LlConnectionCommon,
+        msg: Message,
+    ) -> Result<ConnectionState, Error> {
         let payload = require_handshake_msg!(
             msg,
             HandshakeType::ServerHello,
@@ -188,7 +191,11 @@ struct ExpectCertificate {
 }
 
 impl ExpectState for ExpectCertificate {
-    fn process_message(self: Box<Self>, msg: Message) -> Result<ConnectionState, Error> {
+    fn process_message(
+        self: Box<Self>,
+        _conn: &mut LlConnectionCommon,
+        msg: Message,
+    ) -> Result<ConnectionState, Error> {
         let payload = require_handshake_msg_move!(
             msg,
             HandshakeType::Certificate,
@@ -232,7 +239,11 @@ struct ExpectServerKeyExchange {
     transcript: HandshakeHash,
 }
 impl ExpectState for ExpectServerKeyExchange {
-    fn process_message(self: Box<Self>, msg: Message) -> Result<ConnectionState, Error> {
+    fn process_message(
+        self: Box<Self>,
+        _conn: &mut LlConnectionCommon,
+        msg: Message,
+    ) -> Result<ConnectionState, Error> {
         let opaque_kx = require_handshake_msg_move!(
             msg,
             HandshakeType::ServerKeyExchange,
@@ -262,7 +273,11 @@ struct ExpectServerHelloDone {
 }
 
 impl ExpectState for ExpectServerHelloDone {
-    fn process_message(self: Box<Self>, msg: Message) -> Result<ConnectionState, Error> {
+    fn process_message(
+        self: Box<Self>,
+        _conn: &mut LlConnectionCommon,
+        msg: Message,
+    ) -> Result<ConnectionState, Error> {
         match msg.payload {
             MessagePayload::Handshake {
                 parsed:
@@ -463,10 +478,16 @@ struct ExpectChangeCipherSpec {
 }
 
 impl ExpectState for ExpectChangeCipherSpec {
-    fn process_message(self: Box<Self>, msg: Message) -> Result<ConnectionState, Error> {
+    fn process_message(
+        self: Box<Self>,
+        conn: &mut LlConnectionCommon,
+        msg: Message,
+    ) -> Result<ConnectionState, Error> {
         match msg.payload {
             MessagePayload::ChangeCipherSpec(_) => {
-                Ok(ConnectionState::intermediate(StartDecrypting {
+                conn.record_layer.start_decrypting();
+
+                Ok(ConnectionState::expect(ExpectFinished {
                     transcript: self.transcript,
                 }))
             }
@@ -478,28 +499,16 @@ impl ExpectState for ExpectChangeCipherSpec {
     }
 }
 
-struct StartDecrypting {
-    transcript: HandshakeHash,
-}
-
-impl IntermediateState for StartDecrypting {
-    fn next_state(
-        self: Box<Self>,
-        conn: &mut LlConnectionCommon,
-    ) -> Result<ConnectionState, Error> {
-        conn.record_layer.start_decrypting();
-        Ok(ConnectionState::expect(ExpectFinished {
-            transcript: self.transcript,
-        }))
-    }
-}
-
 struct ExpectFinished {
     transcript: HandshakeHash,
 }
 
 impl ExpectState for ExpectFinished {
-    fn process_message(self: Box<Self>, msg: Message) -> Result<ConnectionState, Error> {
+    fn process_message(
+        self: Box<Self>,
+        _conn: &mut LlConnectionCommon,
+        msg: Message,
+    ) -> Result<ConnectionState, Error> {
         let _ = require_handshake_msg!(msg, HandshakeType::Finished, HandshakePayload::Finished)?;
 
         Ok(ConnectionState::HandshakeDone)

@@ -27,7 +27,6 @@ pub(crate) enum ConnectionState {
     Expect(Box<dyn ExpectState>),
     Emit(Box<dyn EmitState>),
     AfterEncode(Box<Self>),
-    Intermediate(Box<dyn IntermediateState>),
     HandshakeDone,
     Poisoned(Error),
     ConnectionClosed,
@@ -53,26 +52,21 @@ impl ConnectionState {
         })
     }
 
-    pub(crate) fn intermediate(state: impl IntermediateState) -> Self {
-        Self::Intermediate(Box::new(state))
-    }
-
     pub(crate) fn as_after_encode(self) -> Self {
         Self::AfterEncode(Box::new(self))
     }
 }
 
 pub(crate) trait ExpectState: 'static {
-    fn process_message(self: Box<Self>, msg: Message) -> Result<ConnectionState, Error>;
+    fn process_message(
+        self: Box<Self>,
+        _conn: &mut LlConnectionCommon,
+        msg: Message,
+    ) -> Result<ConnectionState, Error>;
 
     fn get_transcript_mut(&mut self) -> Option<&mut HandshakeHash> {
         None
     }
-}
-
-pub(crate) trait IntermediateState: 'static {
-    fn next_state(self: Box<Self>, conn: &mut LlConnectionCommon)
-        -> Result<ConnectionState, Error>;
 }
 
 pub(crate) trait EmitState: 'static {
@@ -150,11 +144,8 @@ impl LlConnectionCommon {
                     if let MessagePayload::Alert(alert) = message.payload {
                         self.handle_alert(alert, ConnectionState::Expect(curr_state))?;
                     } else {
-                        self.state = curr_state.process_message(message)?;
+                        self.state = curr_state.process_message(self, message)?;
                     };
-                }
-                ConnectionState::Intermediate(state) => {
-                    self.state = state.next_state(self)?;
                 }
                 state @ ConnectionState::HandshakeDone => {
                     let mut reader = Reader::init(&incoming_tls[self.offset..]);
