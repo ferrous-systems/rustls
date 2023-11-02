@@ -37,6 +37,29 @@ impl CommonState {
     fn take(&mut self) -> Self {
         core::mem::replace(self, Self::Unreachable)
     }
+
+    pub(crate) fn expect(state: impl ExpectState) -> Self {
+        Self::Expect(Box::new(state))
+    }
+
+    pub(crate) fn emit(state: impl EmitState) -> Self {
+        Self::Emit(Box::new(state))
+    }
+
+    pub(crate) fn emit_alert(description: AlertDescription, err: impl Into<Error>) -> Self {
+        Self::emit(EmitAlert {
+            description,
+            error: err.into(),
+        })
+    }
+
+    pub(crate) fn intermediate(state: impl IntermediateState) -> Self {
+        Self::Intermediate(Box::new(state))
+    }
+
+    pub(crate) fn as_after_emit(self) -> Self {
+        Self::AfterEmit(Box::new(self))
+    }
 }
 
 pub(crate) trait ExpectState: Send + 'static {
@@ -235,10 +258,10 @@ impl LlConnectionCommon {
         curr_state: CommonState,
     ) -> Result<(), Error> {
         self.state = if let AlertLevel::Unknown(_) = alert.level {
-            CommonState::Emit(Box::new(EmitAlert::new(
+            CommonState::emit_alert(
                 AlertDescription::IllegalParameter,
                 Error::AlertReceived(alert.description),
-            )))
+            )
         } else if alert.description == AlertDescription::CloseNotify {
             CommonState::ConnectionClosed
         } else if alert.level == AlertLevel::Warning {
@@ -508,25 +531,16 @@ impl<'c> TrafficTransit<'c> {
     }
 }
 
-pub(crate) struct EmitAlert {
+struct EmitAlert {
     description: AlertDescription,
     error: Error,
-}
-
-impl EmitAlert {
-    pub(crate) fn new(description: AlertDescription, error: impl Into<Error>) -> Self {
-        Self {
-            description,
-            error: error.into(),
-        }
-    }
 }
 
 impl EmitState for EmitAlert {
     fn generate_message(self: Box<Self>) -> GeneratedMessage {
         GeneratedMessage::new(
             Message::build_alert(AlertLevel::Fatal, self.description),
-            CommonState::AfterEmit(Box::new(CommonState::Poisoned(self.error))),
+            CommonState::Poisoned(self.error),
         )
     }
 }
@@ -546,7 +560,7 @@ impl GeneratedMessage {
             plain_msg: msg.into(),
             needs_encryption: false,
             skip_index: 0,
-            next_state,
+            next_state: next_state.as_after_emit(),
         }
     }
 

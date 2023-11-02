@@ -12,8 +12,7 @@ use crate::conn::ConnectionRandoms;
 use crate::crypto::ActiveKeyExchange;
 use crate::hash_hs::{HandshakeHash, HandshakeHashBuffer};
 use crate::low_level::{
-    CommonState, EmitAlert, EmitState, ExpectState, GeneratedMessage, IntermediateState,
-    LlConnectionCommon,
+    CommonState, EmitState, ExpectState, GeneratedMessage, IntermediateState, LlConnectionCommon,
 };
 use crate::msgs::base::{Payload, PayloadU8};
 use crate::msgs::ccs::ChangeCipherSpecPayload;
@@ -55,11 +54,11 @@ impl LlClientConnection {
         let random = Random::new(config.provider)?;
 
         Ok(Self {
-            conn: LlConnectionCommon::new(CommonState::Emit(Box::new(EmitClientHello {
+            conn: LlConnectionCommon::new(CommonState::emit(EmitClientHello {
                 config,
                 name,
                 random,
-            })))?,
+            }))?,
         })
     }
 }
@@ -124,13 +123,13 @@ impl EmitState for EmitClientHello {
 
         let mut transcript_buffer = HandshakeHashBuffer::new();
         transcript_buffer.add_message(&msg);
-        let next_state =
-            CommonState::AfterEmit(Box::new(CommonState::Expect(Box::new(ExpectServerHello {
-                config: self.config,
-                name: self.name,
-                transcript_buffer,
-                random: self.random,
-            }))));
+
+        let next_state = CommonState::expect(ExpectServerHello {
+            config: self.config,
+            name: self.name,
+            transcript_buffer,
+            random: self.random,
+        });
 
         GeneratedMessage::new(msg, next_state)
     }
@@ -155,10 +154,10 @@ impl ExpectState for ExpectServerHello {
             .config
             .find_cipher_suite(payload.cipher_suite)
         else {
-            return Ok(CommonState::Emit(Box::new(EmitAlert::new(
+            return Ok(CommonState::emit_alert(
                 AlertDescription::HandshakeFailure,
                 PeerMisbehaved::SelectedUnofferedCipherSuite,
-            ))));
+            ));
         };
         let mut transcript = self
             .transcript_buffer
@@ -171,13 +170,13 @@ impl ExpectState for ExpectServerHello {
             SupportedCipherSuite::Tls13(_) => todo!(),
         };
 
-        Ok(CommonState::Expect(Box::new(ExpectCertificate {
+        Ok(CommonState::expect(ExpectCertificate {
             config: self.config,
             name: self.name,
             suite,
             randoms: ConnectionRandoms::new(self.random, payload.random),
             transcript,
-        })))
+        }))
     }
 }
 
@@ -204,21 +203,21 @@ impl ExpectState for ExpectCertificate {
             &[],
             UnixTime::now(),
         ) {
-            Ok(CommonState::Emit(Box::new(EmitAlert::new(
+            Ok(CommonState::emit_alert(
                 match &error {
                     Error::InvalidCertificate(e) => e.clone().into(),
                     Error::PeerMisbehaved(_) => AlertDescription::IllegalParameter,
                     _ => AlertDescription::HandshakeFailure,
                 },
                 error,
-            ))))
+            ))
         } else {
-            Ok(CommonState::Expect(Box::new(ExpectServerKeyExchange {
+            Ok(CommonState::expect(ExpectServerKeyExchange {
                 config: self.config,
                 suite: self.suite,
                 randoms: self.randoms,
                 transcript: self.transcript,
-            })))
+            }))
         }
     }
 
@@ -241,13 +240,13 @@ impl ExpectState for ExpectServerKeyExchange {
             HandshakePayload::ServerKeyExchange
         )?;
 
-        Ok(CommonState::Expect(Box::new(ExpectServerHelloDone {
+        Ok(CommonState::expect(ExpectServerHelloDone {
             config: self.config,
             suite: self.suite,
             randoms: self.randoms,
             opaque_kx,
             transcript: self.transcript,
-        })))
+        }))
     }
 
     fn get_transcript_mut(&mut self) -> Option<&mut HandshakeHash> {
@@ -286,10 +285,10 @@ impl ExpectState for ExpectServerHelloDone {
                     .opaque_kx
                     .unwrap_given_kxa(self.suite.kx)
                 else {
-                    return Ok(CommonState::Emit(Box::new(EmitAlert::new(
+                    return Ok(CommonState::emit_alert(
                         AlertDescription::DecodeError,
                         InvalidMessage::MissingKeyExchange,
-                    ))));
+                    ));
                 };
 
                 let mut kx_params = Vec::new();
@@ -299,33 +298,33 @@ impl ExpectState for ExpectServerHelloDone {
                 let ecdh_params = ServerEcdhParams::read(&mut rd)?;
 
                 if rd.any_left() {
-                    return Ok(CommonState::Emit(Box::new(EmitAlert::new(
+                    return Ok(CommonState::emit_alert(
                         AlertDescription::DecodeError,
                         InvalidMessage::InvalidDhParams,
-                    ))));
+                    ));
                 }
 
                 let Some(skxg) = self
                     .config
                     .find_kx_group(ecdh_params.curve_params.named_group)
                 else {
-                    return Ok(CommonState::Emit(Box::new(EmitAlert::new(
+                    return Ok(CommonState::emit_alert(
                         AlertDescription::IllegalParameter,
                         PeerMisbehaved::IllegalHelloRetryRequestWithUnofferedNamedGroup,
-                    ))));
+                    ));
                 };
 
                 let kx = skxg
                     .start()
                     .map_err(|_| Error::FailedToGetRandomBytes)?;
 
-                Ok(CommonState::Emit(Box::new(EmitClientKeyExchange {
+                Ok(CommonState::emit(EmitClientKeyExchange {
                     suite: self.suite,
                     kx,
                     ecdh_params,
                     randoms: self.randoms,
                     transcript: self.transcript,
-                })))
+                }))
             }
             payload => {
                 return Err(inappropriate_handshake_message(
@@ -369,13 +368,13 @@ impl EmitState for EmitClientKeyExchange {
 
         self.transcript.add_message(&msg);
 
-        let next_state = CommonState::Intermediate(Box::new(SetupClientEncryption {
+        let next_state = CommonState::intermediate(SetupClientEncryption {
             kx: self.kx,
             peer_pub_key: self.ecdh_params.public.0,
             randoms: self.randoms,
             suite: self.suite,
             transcript: self.transcript,
-        }));
+        });
 
         GeneratedMessage::new(msg, next_state)
     }
@@ -409,12 +408,11 @@ impl IntermediateState for SetupClientEncryption {
             .prepare_message_decrypter(dec);
         common.record_layer.start_encrypting();
 
-        Ok(CommonState::AfterEmit(Box::new(CommonState::Emit(
-            Box::new(EmitChangeCipherSpec {
-                secrets,
-                transcript: self.transcript,
-            }),
-        ))))
+        Ok(CommonState::emit(EmitChangeCipherSpec {
+            secrets,
+            transcript: self.transcript,
+        })
+        .as_after_emit())
     }
 }
 
@@ -429,11 +427,10 @@ impl EmitState for EmitChangeCipherSpec {
             payload: MessagePayload::ChangeCipherSpec(ChangeCipherSpecPayload {}),
         };
 
-        let next_state =
-            CommonState::AfterEmit(Box::new(CommonState::Emit(Box::new(EmitFinished {
-                secrets: self.secrets,
-                transcript: self.transcript,
-            }))));
+        let next_state = CommonState::emit(EmitFinished {
+            secrets: self.secrets,
+            transcript: self.transcript,
+        });
 
         GeneratedMessage::new(msg, next_state)
     }
@@ -461,11 +458,9 @@ impl EmitState for EmitFinished {
 
         GeneratedMessage::new(
             msg,
-            CommonState::AfterEmit(Box::new(CommonState::Expect(Box::new(
-                ExpectChangeCipherSpec {
-                    transcript: self.transcript,
-                },
-            )))),
+            CommonState::expect(ExpectChangeCipherSpec {
+                transcript: self.transcript,
+            }),
         )
         .require_encryption(true)
     }
@@ -478,11 +473,9 @@ pub(crate) struct ExpectChangeCipherSpec {
 impl ExpectState for ExpectChangeCipherSpec {
     fn process_message(self: Box<Self>, msg: Message) -> Result<CommonState, Error> {
         match msg.payload {
-            MessagePayload::ChangeCipherSpec(_) => {
-                Ok(CommonState::Intermediate(Box::new(StartDecrypting {
-                    transcript: self.transcript,
-                })))
-            }
+            MessagePayload::ChangeCipherSpec(_) => Ok(CommonState::intermediate(StartDecrypting {
+                transcript: self.transcript,
+            })),
             payload => Err(inappropriate_message(
                 &payload,
                 &[ContentType::ChangeCipherSpec],
@@ -498,9 +491,9 @@ pub(crate) struct StartDecrypting {
 impl IntermediateState for StartDecrypting {
     fn next_state(self: Box<Self>, common: &mut LlConnectionCommon) -> Result<CommonState, Error> {
         common.record_layer.start_decrypting();
-        Ok(CommonState::Expect(Box::new(ExpectFinished {
+        Ok(CommonState::expect(ExpectFinished {
             transcript: self.transcript,
-        })))
+        }))
     }
 }
 
