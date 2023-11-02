@@ -64,7 +64,7 @@ impl LlClientConnection {
     }
 }
 
-pub(crate) struct EmitClientHello {
+struct EmitClientHello {
     config: Arc<ClientConfig>,
     name: ServerName,
     random: Random,
@@ -136,7 +136,7 @@ impl EmitState for EmitClientHello {
     }
 }
 
-pub(crate) struct ExpectServerHello {
+struct ExpectServerHello {
     config: Arc<ClientConfig>,
     name: ServerName,
     transcript_buffer: HandshakeHashBuffer,
@@ -181,7 +181,7 @@ impl ExpectState for ExpectServerHello {
     }
 }
 
-pub(crate) struct ExpectCertificate {
+struct ExpectCertificate {
     config: Arc<ClientConfig>,
     name: ServerName,
     suite: &'static Tls12CipherSuite,
@@ -227,7 +227,7 @@ impl ExpectState for ExpectCertificate {
     }
 }
 
-pub(crate) struct ExpectServerKeyExchange {
+struct ExpectServerKeyExchange {
     config: Arc<ClientConfig>,
     suite: &'static Tls12CipherSuite,
     randoms: ConnectionRandoms,
@@ -255,7 +255,7 @@ impl ExpectState for ExpectServerKeyExchange {
     }
 }
 
-pub(crate) struct ExpectServerHelloDone {
+struct ExpectServerHelloDone {
     config: Arc<ClientConfig>,
     suite: &'static Tls12CipherSuite,
     opaque_kx: ServerKeyExchangePayload,
@@ -345,7 +345,7 @@ impl ExpectState for ExpectServerHelloDone {
     }
 }
 
-pub(crate) struct EmitClientKeyExchange {
+struct EmitClientKeyExchange {
     suite: &'static Tls12CipherSuite,
     kx: Box<dyn ActiveKeyExchange>,
     ecdh_params: ServerEcdhParams,
@@ -381,7 +381,7 @@ impl EmitState for EmitClientKeyExchange {
     }
 }
 
-pub(crate) struct SetupClientEncryption {
+struct SetupClientEncryption {
     kx: Box<dyn ActiveKeyExchange>,
     peer_pub_key: Vec<u8>,
     randoms: ConnectionRandoms,
@@ -418,7 +418,7 @@ impl IntermediateState for SetupClientEncryption {
     }
 }
 
-pub(crate) struct EmitChangeCipherSpec {
+struct EmitChangeCipherSpec {
     secrets: ConnectionSecrets,
     transcript: HandshakeHash,
 }
@@ -438,7 +438,7 @@ impl EmitState for EmitChangeCipherSpec {
     }
 }
 
-pub(crate) struct EmitFinished {
+struct EmitFinished {
     secrets: ConnectionSecrets,
     transcript: HandshakeHash,
 }
@@ -468,7 +468,7 @@ impl EmitState for EmitFinished {
     }
 }
 
-pub(crate) struct ExpectChangeCipherSpec {
+struct ExpectChangeCipherSpec {
     transcript: HandshakeHash,
 }
 
@@ -488,7 +488,7 @@ impl ExpectState for ExpectChangeCipherSpec {
     }
 }
 
-pub(crate) struct StartDecrypting {
+struct StartDecrypting {
     transcript: HandshakeHash,
 }
 
@@ -504,7 +504,7 @@ impl IntermediateState for StartDecrypting {
     }
 }
 
-pub(crate) struct ExpectFinished {
+struct ExpectFinished {
     transcript: HandshakeHash,
 }
 
