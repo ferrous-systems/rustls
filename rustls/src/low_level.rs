@@ -199,7 +199,7 @@ impl LlConnectionCommon {
         &mut self,
         application_data: &[u8],
         outgoing_tls: &mut [u8],
-    ) -> Result<usize, EncryptError> {
+    ) -> Result<usize, EncodeError> {
         let msg: PlainMessage = Message {
             version: ProtocolVersion::TLSv1_2,
             payload: MessagePayload::ApplicationData(Payload(application_data.to_vec())),
@@ -413,37 +413,35 @@ pub struct MustEncodeTlsData<'c> {
 
 /// An error occurred while encrypting a handshake record
 #[derive(Debug)]
-pub enum EncryptError {
+pub enum EncodeError {
     /// Provided buffer was too small
     InsufficientSize(InsufficientSizeError),
 
-    /// The handshake record has already been encrypted; do not call `encrypt` again
-    AlreadyEncrypted,
+    /// The handshake record has already been encoded; do not call `encode` again
+    AlreadyEncoded,
 }
 
-impl core::fmt::Display for EncryptError {
+impl core::fmt::Display for EncodeError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            EncryptError::InsufficientSize(InsufficientSizeError { required_size }) => write!(
+            EncodeError::InsufficientSize(InsufficientSizeError { required_size }) => write!(
                 f,
-                "cannot encrypt due to insufficient size, {} bytes are required",
+                "cannot encode due to insufficient size, {} bytes are required",
                 required_size
             ),
-            EncryptError::AlreadyEncrypted => {
-                "cannot encrypt, data has already been encrypted".fmt(f)
-            }
+            EncodeError::AlreadyEncoded => "cannot encode, data has already been encoded".fmt(f),
         }
     }
 }
 
-impl std::error::Error for EncryptError {}
+impl std::error::Error for EncodeError {}
 
 impl<'c> MustEncodeTlsData<'c> {
     /// Encodes a handshake record into the `outgoing_tls` buffer
     ///
     /// returns the number of bytes that were written into `outgoing_tls`, or an error if
     /// the provided buffer was too small. in the error case, `outgoing_tls` is not modified
-    pub fn encode(&mut self, outgoing_tls: &mut [u8]) -> Result<usize, EncryptError> {
+    pub fn encode(&mut self, outgoing_tls: &mut [u8]) -> Result<usize, EncodeError> {
         let GeneratedMessage {
             ref plain_msg,
             needs_encryption,
@@ -476,7 +474,7 @@ impl<'c> MustEncodeTlsData<'c> {
 
                 self.generated_message.skip_index = index;
 
-                return Err(EncryptError::InsufficientSize(InsufficientSizeError {
+                return Err(EncodeError::InsufficientSize(InsufficientSizeError {
                     required_size,
                 }));
             }
@@ -521,7 +519,7 @@ impl<'c> TrafficTransit<'c> {
         &mut self,
         application_data: &[u8],
         outgoing_tls: &mut [u8],
-    ) -> Result<usize, EncryptError> {
+    ) -> Result<usize, EncodeError> {
         self.conn
             .encrypt_traffic_transit(application_data, outgoing_tls)
     }

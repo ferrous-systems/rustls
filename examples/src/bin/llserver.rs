@@ -1,4 +1,4 @@
-use rustls::low_level::{AppDataRecord, EncryptError, InsufficientSizeError, State, Status};
+use rustls::low_level::{AppDataRecord, EncodeError, InsufficientSizeError, State, Status};
 use rustls::server::low_level::LlServerConnection;
 use std::fs;
 use std::io::{BufReader, Read, Write};
@@ -81,7 +81,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         State::MustEncodeTlsData(mut state) => {
                             let written = match state.encode(&mut outgoing_tls[outgoing_used..]) {
                                 Ok(written) => written,
-                                Err(EncryptError::InsufficientSize(InsufficientSizeError {
+                                Err(EncodeError::InsufficientSize(InsufficientSizeError {
                                     required_size,
                                 })) => {
                                     let new_len = outgoing_used + required_size;
