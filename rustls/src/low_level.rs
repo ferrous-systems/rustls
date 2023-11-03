@@ -35,9 +35,9 @@ pub(crate) enum ConnectionState {
     AfterEncode(Box<Self>),
     /// The handshake has been successful.
     HandshakeDone,
-    /// A fatal alert has been emitted. Calling [`LlConnectionCommon::process_tls_records`] will
-    /// return the error contained in this state.
-    AfterAlert(Error),
+    /// A fatal error happened and the connection cannot continue. Calling
+    /// [`LlConnectionCommon::process_tls_records`] will return the error contained in this state.
+    FatalError(Error),
     /// The connection is closed
     ConnectionClosed,
 }
@@ -126,9 +126,9 @@ impl LlConnectionCommon {
                     return self.gen_status(|_| State::ConnectionClosed);
                 }
                 // We just emitted a fatal alert.
-                ConnectionState::AfterAlert(err) => {
+                ConnectionState::FatalError(err) => {
                     // Restore the current state as we cannot do anything else.
-                    self.state = ConnectionState::AfterAlert(err.clone());
+                    self.state = ConnectionState::FatalError(err.clone());
                     // Return the error provided by the alert.
                     return Err(err.clone());
                 }
@@ -176,14 +176,13 @@ impl LlConnectionCommon {
                         }
                         Err(err) => return Err(err),
                     };
-                    if let MessagePayload::Alert(alert) = message.payload {
+                    self.state = if let MessagePayload::Alert(alert) = message.payload {
                         // If the message is an alert, handle it and restore the current state as
-                        // we should expect the message again if the alert is not bad enough to
-                        // change the state.
-                        self.handle_alert(alert, ConnectionState::Expect(state))?;
+                        // we should expect the message again if the alert is not bad enough..
+                        handle_alert(alert, ConnectionState::Expect(state))
                     } else {
                         // Process the message otherwise.
-                        self.state = state.process_message(self, message)?;
+                        state.process_message(self, message)?
                     };
                 }
                 // The handshake is done and we are exchanging application data.
@@ -244,7 +243,7 @@ impl LlConnectionCommon {
                             };
                             // Handle it and keep exchanging application data afterwards unless
                             // the alert is critical.
-                            self.handle_alert(alert, ConnectionState::HandshakeDone)?;
+                            self.state = handle_alert(alert, ConnectionState::HandshakeDone);
                         }
                         // FIXME: handle other types of messages.
                         content_type => {
@@ -383,34 +382,31 @@ impl LlConnectionCommon {
 
         Ok(msg)
     }
+}
 
-    /// Handle an incoming alert and set the connection state to `next_state` if the alert is not
-    /// critical.
-    fn handle_alert(
-        &mut self,
-        alert: AlertMessagePayload,
-        next_state: ConnectionState,
-    ) -> Result<(), Error> {
-        // This code is based on `CommonState::process_alert`.
-        self.state = if let AlertLevel::Unknown(_) = alert.level {
-            // Reject unknown alert levels.
-            ConnectionState::emit_alert(
-                AlertDescription::IllegalParameter,
-                Error::AlertReceived(alert.description),
-            )
-        } else if alert.description == AlertDescription::CloseNotify {
-            // Set the connection state to closed if we receive a close notify alert.
-            ConnectionState::ConnectionClosed
-        } else if alert.level == AlertLevel::Warning {
-            // Set the connection state to `next_state` if the alert is a warning.
-            std::println!("TLS alert warning received: {:#?}", alert);
-            next_state
-        } else {
-            // Otherwise, the alert is fatal and we return an error.
-            return Err(Error::AlertReceived(alert.description));
-        };
-
-        Ok(())
+/// Handle an incoming alert and compute the next connection state.
+///
+///
+/// This function returns `next_state` if the alert received doesn't require any change of state to
+/// be handled.
+fn handle_alert(alert: AlertMessagePayload, next_state: ConnectionState) -> ConnectionState {
+    // This code is based on `CommonState::process_alert`.
+    if let AlertLevel::Unknown(_) = alert.level {
+        // Reject unknown alert levels.
+        ConnectionState::emit_alert(
+            AlertDescription::IllegalParameter,
+            Error::AlertReceived(alert.description),
+        )
+    } else if alert.description == AlertDescription::CloseNotify {
+        // Set the connection state to closed if we receive a close notify alert.
+        ConnectionState::ConnectionClosed
+    } else if alert.level == AlertLevel::Warning {
+        // Set the connection state to `next_state` if the alert is a warning.
+        std::println!("TLS alert warning received: {:#?}", alert);
+        next_state
+    } else {
+        // Otherwise, the alert is fatal and we shouldn't continue the connection.
+        ConnectionState::FatalError(Error::AlertReceived(alert.description))
     }
 }
 
@@ -668,7 +664,7 @@ impl EmitState for EmitAlert {
     ) -> Result<GeneratedMessage, Error> {
         Ok(GeneratedMessage::new(
             Message::build_alert(AlertLevel::Fatal, self.description),
-            ConnectionState::AfterAlert(self.error),
+            ConnectionState::FatalError(self.error),
         ))
     }
 }
