@@ -89,12 +89,12 @@ pub(crate) trait EmitState: 'static {
 
 /// both `LlClientConnection` and `LlServerConnection` implement `DerefMut<Target = LlConnectionCommon>`
 pub struct LlConnectionCommon {
-    pub(crate) state: ConnectionState,
+    state: ConnectionState,
     pub(crate) record_layer: RecordLayer,
-    pub(crate) message_fragmenter: MessageFragmenter,
+    message_fragmenter: MessageFragmenter,
     /// How much of `incoming_tls` has been read while borrowing it. This is used as the `discard`
     /// field of `Status` when returning from [`LlConnectionCommon::process_tls_records`].
-    pub(crate) offset: usize,
+    offset: usize,
 }
 
 impl LlConnectionCommon {
@@ -134,7 +134,9 @@ impl LlConnectionCommon {
                 }
                 // We have to emit a message to continue the handshake.
                 ConnectionState::Emit(state) => {
-                    // Generate the message
+                    // FIXME: `state` is still `Taken` but it is not clear what should happen if
+                    // the application layer calls [`Self::process_tls_records`] instead of
+                    // handling `MustEncodeTlsData`.
                     let generated_message = state.generate_message(self)?;
                     // Return the `MustEncodeTlsData` status so the message is written to the
                     // `outgoing_tls` buffer once `MustEncodeTlsData::encode` is called. This
@@ -149,6 +151,10 @@ impl LlConnectionCommon {
                 }
                 // We just encoded a message into `outgoing_tls`.
                 ConnectionState::AfterEncode(next_state) => {
+                    // FIXME: `state` is still `Taken` but it is not clear what should happen if
+                    // the application layer calls [`Self::process_tls_records`] instead of
+                    // handling `MustTransmitTlsData`.
+
                     // Return the `MustEncodeTlsData` status so the message that was encoded into
                     // `outgoing_tls` is sent once `MustTransmitTlsData::done` is called. This
                     // method will set the state to `next_state`.
