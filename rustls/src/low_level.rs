@@ -235,13 +235,11 @@ impl LlConnectionCommon {
         plain_msg: &PlainMessage,
         needs_encryption: bool,
         outgoing_tls: &mut [u8],
-    ) -> Result<usize, EncodeError> {
+    ) -> Result<usize, InsufficientSizeError> {
         let required_size = self.fragments_len(plain_msg, needs_encryption);
 
         if required_size > outgoing_tls.len() {
-            return Err(EncodeError::InsufficientSize(InsufficientSizeError {
-                required_size,
-            }));
+            return Err(InsufficientSizeError { required_size });
         }
 
         let mut written_bytes = 0;
@@ -515,7 +513,7 @@ impl<'c> MustEncodeTlsData<'c> {
                 // Restore the state on failure.
                 *after_encode = Some(taken_after_encode);
 
-                Err(err)
+                Err(EncodeError::InsufficientSize(err))
             }
         }
     }
@@ -557,31 +555,8 @@ impl<'c> TrafficTransit<'c> {
             payload: MessagePayload::ApplicationData(Payload(application_data.to_vec())),
         });
 
-        let required_size = self.conn.fragments_len(&msg, true);
-
-        if required_size > outgoing_tls.len() {
-            return Err(InsufficientSizeError { required_size });
-        }
-
-        let mut written_bytes = 0;
-
-        for m in self
-            .conn
-            .message_fragmenter
-            .fragment_message(&msg)
-        {
-            let opaque_msg = self
-                .conn
-                .record_layer
-                .encrypt_outgoing(m);
-
-            let bytes = opaque_msg.encode();
-
-            outgoing_tls[written_bytes..written_bytes + bytes.len()].copy_from_slice(&bytes);
-            written_bytes += bytes.len();
-        }
-
-        Ok(written_bytes)
+        self.conn
+            .encode_plain_msg(&msg, true, outgoing_tls)
     }
 }
 
