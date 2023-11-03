@@ -192,24 +192,45 @@ impl LlConnectionCommon {
     }
 
     /// Encode `plain_msg` into `outgoing_tls`. Returns the number of written bytes when
-    /// successful. On failure returns the index of the first fragment that could not be written
-    /// to `outgoing_tls`.
+    /// successful.
     fn encode_plain_msg(
         &mut self,
         plain_msg: &PlainMessage,
         needs_encryption: bool,
-        skip_index: usize,
         outgoing_tls: &mut [u8],
-    ) -> Result<usize, (EncodeError, usize)> {
+    ) -> Result<usize, EncodeError> {
+        let max_frag = self
+            .message_fragmenter
+            .get_max_fragment_size();
+
+        let payload_len = plain_msg.payload.0.len();
+
+        let num_frags = payload_len / max_frag;
+        let rem_len = payload_len % max_frag;
+
+        let required_size = if needs_encryption {
+            let encrypted_max_frag = self
+                .record_layer
+                .encrypted_len(max_frag);
+            let encrypted_rem_len = self.record_layer.encrypted_len(rem_len);
+
+            num_frags * encrypted_max_frag + encrypted_rem_len
+        } else {
+            num_frags * OpaqueMessage::encoded_len(max_frag) + OpaqueMessage::encoded_len(rem_len)
+        };
+
+        if required_size > outgoing_tls.len() {
+            return Err(EncodeError::InsufficientSize(InsufficientSizeError {
+                required_size,
+            }));
+        }
+
         let mut written_bytes = 0;
 
-        let mut iter = self
+        for m in self
             .message_fragmenter
-            .fragment_message(plain_msg)
-            .enumerate()
-            .skip(skip_index);
-
-        while let Some((index, m)) = iter.next() {
+            .fragment_message(&plain_msg)
+        {
             let opaque_msg = if needs_encryption {
                 self.record_layer.encrypt_outgoing(m)
             } else {
@@ -217,15 +238,6 @@ impl LlConnectionCommon {
             };
 
             let bytes = opaque_msg.encode();
-
-            if bytes.len() > outgoing_tls.len() {
-                let required_size = bytes.len();
-
-                return Err((
-                    EncodeError::InsufficientSize(InsufficientSizeError { required_size }),
-                    index,
-                ));
-            }
 
             outgoing_tls[written_bytes..written_bytes + bytes.len()].copy_from_slice(&bytes);
             written_bytes += bytes.len();
@@ -464,7 +476,6 @@ impl<'c> MustEncodeTlsData<'c> {
         let GeneratedMessage {
             ref plain_msg,
             needs_encryption,
-            skip_index,
             ref mut after_encode,
         } = self.generated_message;
 
@@ -474,16 +485,14 @@ impl<'c> MustEncodeTlsData<'c> {
 
         let encode_result =
             self.conn
-                .encode_plain_msg(plain_msg, needs_encryption, skip_index, outgoing_tls);
+                .encode_plain_msg(plain_msg, needs_encryption, outgoing_tls);
 
         match encode_result {
             Ok(written_bytes) => {
                 self.conn.state = ConnectionState::AfterEncode(Box::new(taken_after_encode));
                 Ok(written_bytes)
             }
-            Err((err, index)) => {
-                // Skip over all the successful fragments on the next attempt.
-                self.generated_message.skip_index = index;
+            Err(err) => {
                 // Restore the state on failure.
                 *after_encode = Some(taken_after_encode);
 
@@ -599,7 +608,6 @@ impl EmitState for EmitAlert {
 pub(crate) struct GeneratedMessage {
     plain_msg: PlainMessage,
     needs_encryption: bool,
-    skip_index: usize,
     after_encode: Option<ConnectionState>,
 }
 
@@ -610,7 +618,6 @@ impl GeneratedMessage {
         Self {
             plain_msg: msg.into(),
             needs_encryption: false,
-            skip_index: 0,
             after_encode: Some(after_encode),
         }
     }
