@@ -191,6 +191,43 @@ impl LlConnectionCommon {
         })
     }
 
+    /// Return the total number of bytes required to write all the fragments of `msg` if it were to be
+    /// fragmented and possibly encrypted.
+    fn fragments_len(&self, msg: &PlainMessage, needs_encryption: bool) -> usize {
+        // This is the payload length of the fragments that would use the maximum fragment size
+        // provided by the fragmenter, called complete fragments from now on.
+        let complete_fragment_len = self
+            .message_fragmenter
+            .get_max_fragment_size();
+        // This is the length of the message payload.
+        let payload_len = msg.payload.0.len();
+
+        // When fragmenting a message payload, we would have a certain number of complete fragments
+        // and a trailing fragment.
+
+        // This is the number of complete fragments
+        let num_complete_fragments = payload_len / complete_fragment_len;
+        // This is the payload length of the trailing fragmente
+        let trailing_fragment_len = payload_len % complete_fragment_len;
+
+        if needs_encryption {
+            // This is the length of the complete fragments after being encrypted.
+            let complete_encrypted_fragment_len = self
+                .record_layer
+                .encrypted_len(complete_fragment_len);
+            // This is the length of the trailing fragment after being encrypted.
+            let trailing_encrypted_fragment_len = self
+                .record_layer
+                .encrypted_len(trailing_fragment_len);
+
+            num_complete_fragments * complete_encrypted_fragment_len
+                + trailing_encrypted_fragment_len
+        } else {
+            num_complete_fragments * OpaqueMessage::encoded_len(complete_fragment_len)
+                + OpaqueMessage::encoded_len(trailing_fragment_len)
+        }
+    }
+
     /// Encode `plain_msg` into `outgoing_tls`. Returns the number of written bytes when
     /// successful.
     fn encode_plain_msg(
@@ -199,25 +236,7 @@ impl LlConnectionCommon {
         needs_encryption: bool,
         outgoing_tls: &mut [u8],
     ) -> Result<usize, EncodeError> {
-        let max_frag = self
-            .message_fragmenter
-            .get_max_fragment_size();
-
-        let payload_len = plain_msg.payload.0.len();
-
-        let num_frags = payload_len / max_frag;
-        let rem_len = payload_len % max_frag;
-
-        let required_size = if needs_encryption {
-            let encrypted_max_frag = self
-                .record_layer
-                .encrypted_len(max_frag);
-            let encrypted_rem_len = self.record_layer.encrypted_len(rem_len);
-
-            num_frags * encrypted_max_frag + encrypted_rem_len
-        } else {
-            num_frags * OpaqueMessage::encoded_len(max_frag) + OpaqueMessage::encoded_len(rem_len)
-        };
+        let required_size = self.fragments_len(plain_msg, needs_encryption);
 
         if required_size > outgoing_tls.len() {
             return Err(EncodeError::InsufficientSize(InsufficientSizeError {
@@ -483,9 +502,9 @@ impl<'c> MustEncodeTlsData<'c> {
             return Err(EncodeError::AlreadyEncoded);
         };
 
-        let encode_result =
-            self.conn
-                .encode_plain_msg(plain_msg, needs_encryption, outgoing_tls);
+        let encode_result = self
+            .conn
+            .encode_plain_msg(plain_msg, needs_encryption, outgoing_tls);
 
         match encode_result {
             Ok(written_bytes) => {
@@ -538,26 +557,7 @@ impl<'c> TrafficTransit<'c> {
             payload: MessagePayload::ApplicationData(Payload(application_data.to_vec())),
         });
 
-        let max_frag = self
-            .conn
-            .message_fragmenter
-            .get_max_fragment_size();
-
-        let payload_len = msg.payload.0.len();
-
-        let num_frags = payload_len / max_frag;
-        let rem_len = payload_len % max_frag;
-
-        let encrypted_max_frag = self
-            .conn
-            .record_layer
-            .encrypted_len(max_frag);
-        let encrypted_rem_len = self
-            .conn
-            .record_layer
-            .encrypted_len(rem_len);
-
-        let required_size = num_frags * encrypted_max_frag + encrypted_rem_len;
+        let required_size = self.conn.fragments_len(&msg, true);
 
         if required_size > outgoing_tls.len() {
             return Err(InsufficientSizeError { required_size });
@@ -576,13 +576,10 @@ impl<'c> TrafficTransit<'c> {
                 .encrypt_outgoing(m);
 
             let bytes = opaque_msg.encode();
-            assert_eq!(bytes.len(), encrypted_rem_len);
 
             outgoing_tls[written_bytes..written_bytes + bytes.len()].copy_from_slice(&bytes);
             written_bytes += bytes.len();
         }
-
-        debug_assert_eq!(required_size, written_bytes);
 
         Ok(written_bytes)
     }
