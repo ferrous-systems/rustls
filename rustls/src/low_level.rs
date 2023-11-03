@@ -22,13 +22,23 @@ use crate::{
 };
 use crate::{AlertDescription, ContentType, InvalidMessage};
 
+/// Represents the state of `LlConnectionCommon`.
 pub(crate) enum ConnectionState {
+    /// A poisoned state that is only produced inside [`LlConnectionCommon::process_tls_records`]
+    /// as a placeholder to compute the new state without having borrowing issues.
     Taken,
+    /// The connection is expecting a specific kind of [`Message`].
     Expect(Box<dyn ExpectState>),
+    /// The connection needs to emit an already generated [`Message`].
     Emit(Box<dyn EmitState>),
+    /// The state that the connection will have after [`MustEncodeTlsData::done`] is called.
     AfterEncode(Box<Self>),
+    /// The handshake has been successful.
     HandshakeDone,
+    /// A fatal alert has been emitted. Calling [`LlConnectionCommon::process_tls_records`] will
+    /// return the error contained in this state.
     AfterAlert(Error),
+    /// The connection is closed
     ConnectionClosed,
 }
 
@@ -49,19 +59,28 @@ impl ConnectionState {
     }
 }
 
+/// A connection state that is expecting for a specific kind of [`Message`]
 pub(crate) trait ExpectState: 'static {
+    /// Process an incomming message and return the next connection state if the message has the
+    /// right kind.
     fn process_message(
         self: Box<Self>,
         _conn: &mut LlConnectionCommon,
         msg: Message,
     ) -> Result<ConnectionState, Error>;
 
+    /// Get the transcript contained on this state. This is used to call
+    /// [`HandshakeHash::add_message`] before calling [`ExpectState::process_message`] so we do not
+    /// forget to add it to the transcript by accident.
     fn get_transcript_mut(&mut self) -> Option<&mut HandshakeHash> {
         None
     }
 }
 
+/// A connection state that will generate a [`Message`] that will be emitted during
+/// [`MustEncodeTlsData::encode`].
 pub(crate) trait EmitState: 'static {
+    /// Generate the message to be emitted. See [`GeneratedMessage`] for more information.
     fn generate_message(
         self: Box<Self>,
         _conn: &mut LlConnectionCommon,
@@ -73,6 +92,8 @@ pub struct LlConnectionCommon {
     pub(crate) state: ConnectionState,
     pub(crate) record_layer: RecordLayer,
     pub(crate) message_fragmenter: MessageFragmenter,
+    /// How much of `incoming_tls` has been read while borrowing it. This is used as the `discard`
+    /// field of `Status` when returning from [`LlConnectionCommon::process_tls_records`].
     pub(crate) offset: usize,
 }
 
