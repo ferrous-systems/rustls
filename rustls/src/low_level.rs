@@ -114,17 +114,32 @@ impl LlConnectionCommon {
         incoming_tls: &'i mut [u8],
     ) -> Result<Status<'c, 'i>, Error> {
         loop {
+            // Take the current state.
             match core::mem::replace(&mut self.state, ConnectionState::Taken) {
+                // We should never take the state without setting it back.
                 ConnectionState::Taken => unreachable!(),
-                ConnectionState::ConnectionClosed => {
-                    return self.gen_status(|_| State::ConnectionClosed)
+                // The connection is closed.
+                state @ ConnectionState::ConnectionClosed => {
+                    // Restore the current state as we cannot do anything else.
+                    self.state = state;
+                    // Return the connection closed status.
+                    return self.gen_status(|_| State::ConnectionClosed);
                 }
+                // We just emitted a fatal alert.
                 ConnectionState::AfterAlert(err) => {
-                    return Err(err);
+                    // Restore the current state as we cannot do anything else.
+                    self.state = ConnectionState::AfterAlert(err.clone());
+                    // Return the error provided by the alert.
+                    return Err(err.clone());
                 }
+                // We have to emit a message to continue the handshake.
                 ConnectionState::Emit(state) => {
+                    // Generate the message
                     let generated_message = state.generate_message(self)?;
-
+                    // Return the `MustEncodeTlsData` status so the message is written to the
+                    // `outgoing_tls` buffer once `MustEncodeTlsData::encode` is called. This
+                    // method will restore the connection state based on the information provided
+                    // by `generated_message`.
                     return self.gen_status(|conn| {
                         State::MustEncodeTlsData(MustEncodeTlsData {
                             conn,
@@ -132,8 +147,11 @@ impl LlConnectionCommon {
                         })
                     });
                 }
-
+                // We just encoded a message into `outgoing_tls`.
                 ConnectionState::AfterEncode(next_state) => {
+                    // Return the `MustEncodeTlsData` status so the message that was encoded into
+                    // `outgoing_tls` is sent once `MustTransmitTlsData::done` is called. This
+                    // method will set the state to `next_state`.
                     return self.gen_status(|conn| {
                         State::MustTransmitTlsData(MustTransmitTlsData {
                             conn,
@@ -141,60 +159,96 @@ impl LlConnectionCommon {
                         })
                     });
                 }
-                ConnectionState::Expect(mut curr_state) => {
-                    let transcript = curr_state.get_transcript_mut();
+                // We are expecting a message.
+                ConnectionState::Expect(mut state) => {
+                    let transcript = state.get_transcript_mut();
+                    // Read a message from `incoming_tls`.
                     let message = match self.read_message(incoming_tls, transcript) {
                         Ok(message) => message,
+                        // If the message is too short, we need more bytes in `incoming_tls`.
                         Err(Error::InvalidMessage(InvalidMessage::MessageTooShort)) => {
-                            self.state = ConnectionState::Expect(curr_state);
-
+                            // Restore the curren state as we should expect the message again once
+                            // we get more data.
+                            self.state = ConnectionState::Expect(state);
+                            // Return the `NeedsMoreTlsData` state.
                             return self
                                 .gen_status(|_| State::NeedsMoreTlsData { num_bytes: None });
                         }
                         Err(err) => return Err(err),
                     };
-
                     if let MessagePayload::Alert(alert) = message.payload {
-                        self.handle_alert(alert, ConnectionState::Expect(curr_state))?;
+                        // If the message is an alert, handle it and restore the current state as
+                        // we should expect the message again if the alert is not bad enough to
+                        // change the state.
+                        self.handle_alert(alert, ConnectionState::Expect(state))?;
                     } else {
-                        self.state = curr_state.process_message(self, message)?;
+                        // Process the message otherwise.
+                        self.state = state.process_message(self, message)?;
                     };
                 }
+                // The handshake is done and we are exchanging application data.
                 state @ ConnectionState::HandshakeDone => {
-                    let mut reader = Reader::init(&incoming_tls[self.offset..]);
-                    match OpaqueMessage::read(&mut reader) {
-                        Ok(msg) => match msg.typ {
-                            ContentType::ApplicationData => {
-                                self.state = state;
+                    let unread_data = &incoming_tls[self.offset..];
+                    // If there is no data to read, we can write.
+                    if unread_data.is_empty() {
+                        // We restore the current state as we caan keep exchanging
+                        // application data.
+                        self.state = state;
+                        // Return the `TrafficTransit` stsatus so the application layer can send
+                        // data.
+                        return self
+                            .gen_status(|conn| State::TrafficTransit(TrafficTransit { conn }));
+                    }
+                    // Read a message from `incoming_tls` and inspect its content type to decide
+                    // what to do.
+                    //
+                    // We don't call `LlConnectionCommon::read_message` here because we don't want
+                    // to completely read and decrypt the message. Just inspect its header.
+                    let mut reader = Reader::init(&unread_data);
+                    let msg = OpaqueMessage::read(&mut reader).map_err(|err| match err {
+                        MessageError::TooShortForHeader | MessageError::TooShortForLength => {
+                            InvalidMessage::MessageTooShort
+                        }
+                        MessageError::InvalidEmptyPayload => InvalidMessage::InvalidEmptyPayload,
+                        MessageError::MessageTooLarge => InvalidMessage::MessageTooLarge,
+                        MessageError::InvalidContentType => InvalidMessage::InvalidContentType,
+                        MessageError::UnknownProtocolVersion => {
+                            InvalidMessage::UnknownProtocolVersion
+                        }
+                    })?;
 
-                                return self.gen_status(|conn| {
-                                    State::AppDataAvailable(AppDataAvailable {
-                                        incoming_tls: Some(incoming_tls),
-                                        conn,
-                                    })
-                                });
-                            }
-                            ContentType::Alert => {
-                                let Message {
-                                    payload: MessagePayload::Alert(alert),
-                                    ..
-                                } = self.read_message(incoming_tls, None)?
-                                else {
-                                    unreachable!()
-                                };
-
-                                self.handle_alert(alert, ConnectionState::HandshakeDone)?;
-                            }
-
-                            content_type => {
-                                panic!("{:?}", content_type);
-                            }
-                        },
-                        Err(_) => {
+                    match msg.typ {
+                        // We received application data.
+                        ContentType::ApplicationData => {
+                            // We restore the current state as we caan keep exchanging
+                            // application data.
                             self.state = state;
-
-                            return self
-                                .gen_status(|conn| State::TrafficTransit(TrafficTransit { conn }));
+                            // Return the `AppDataAvailable` status so the application layer
+                            // can process the available application data.
+                            return self.gen_status(|conn| {
+                                State::AppDataAvailable(AppDataAvailable {
+                                    incoming_tls: Some(incoming_tls),
+                                    conn,
+                                })
+                            });
+                        }
+                        // We received an alert.
+                        ContentType::Alert => {
+                            // Read the complete alert message.
+                            let Message {
+                                payload: MessagePayload::Alert(alert),
+                                ..
+                            } = self.read_message(incoming_tls, None)?
+                            else {
+                                unreachable!()
+                            };
+                            // Handle it and keep exchanging application data afterwards unless
+                            // the alert is critical.
+                            self.handle_alert(alert, ConnectionState::HandshakeDone)?;
+                        }
+                        // FIXME: handle other types of messages.
+                        content_type => {
+                            panic!("{:?}", content_type);
                         }
                     }
                 }
@@ -202,6 +256,9 @@ impl LlConnectionCommon {
         }
     }
 
+    /// Generate a new status to be returned by [`Self::process_tls_records`].
+    ///
+    /// This method sets the `discard` field of the status to `offset`.
     fn gen_status<'c, 'i>(
         &'c mut self,
         f: impl FnOnce(&'c mut Self) -> State<'c, 'i>,
@@ -257,26 +314,29 @@ impl LlConnectionCommon {
         needs_encryption: bool,
         outgoing_tls: &mut [u8],
     ) -> Result<usize, InsufficientSizeError> {
+        // Compute the size required to encode `plain_msg`
         let required_size = self.fragments_len(plain_msg, needs_encryption);
-
+        // Return an error if `plain_msg` won't fit in `outgoing_tls`.
         if required_size > outgoing_tls.len() {
             return Err(InsufficientSizeError { required_size });
         }
 
         let mut written_bytes = 0;
-
+        // Fragment the message and write each fragment into `outgoing_tls`.
         for m in self
             .message_fragmenter
             .fragment_message(&plain_msg)
         {
+            // Encrypt the message if required
             let opaque_msg = if needs_encryption {
                 self.record_layer.encrypt_outgoing(m)
             } else {
                 m.to_unencrypted_opaque()
             };
-
+            // Encode the message into bytes.
             let bytes = opaque_msg.encode();
-
+            // Write the bytes into `outgoing_tls. This won't panic because we know that the whole
+            // message already fits.`
             outgoing_tls[written_bytes..written_bytes + bytes.len()].copy_from_slice(&bytes);
             written_bytes += bytes.len();
         }
@@ -284,12 +344,16 @@ impl LlConnectionCommon {
         Ok(written_bytes)
     }
 
+    /// Read a message from `incoming_tls` and add it to `transcript` if it is `Some`.
     fn read_message(
         &mut self,
         incoming_tls: &[u8],
         transcript_opt: Option<&mut HandshakeHash>,
     ) -> Result<Message, Error> {
+        // Initialize a new reader with the unread section of `incoming_tls`.
         let mut reader = Reader::init(&incoming_tls[self.offset..]);
+        // Read an opaque message. I'm not sure why `InvalidMessage` doesn't implement
+        // `From<MessageError>`.
         let m = OpaqueMessage::read(&mut reader).map_err(|err| match err {
             MessageError::TooShortForHeader | MessageError::TooShortForLength => {
                 InvalidMessage::MessageTooShort
@@ -299,39 +363,50 @@ impl LlConnectionCommon {
             MessageError::InvalidContentType => InvalidMessage::InvalidContentType,
             MessageError::UnknownProtocolVersion => InvalidMessage::UnknownProtocolVersion,
         })?;
+        // Update `offset` as we were able to read a message successfully.
         self.offset += reader.used();
-
+        // Decrypt the opaque message. This method works for unencrypted data as well so we don't
+        // have to worry about it.
         let decrypted = self
             .record_layer
             .decrypt_incoming(m)?
+            // The result of `decrypt_incoming` can only be `None` when dealing with early data.
             .expect("we don't support early data yet");
 
         let msg = decrypted.plaintext.try_into()?;
+        // Add the message to the transcript.
         if let Some(transcript) = transcript_opt {
             transcript.add_message(&msg);
         }
-
+        // Log the message.
         log_msg(&msg, true);
 
         Ok(msg)
     }
 
+    /// Handle an incoming alert and set the connection state to `next_state` if the alert is not
+    /// critical.
     fn handle_alert(
         &mut self,
         alert: AlertMessagePayload,
-        curr_state: ConnectionState,
+        next_state: ConnectionState,
     ) -> Result<(), Error> {
+        // This code is based on `CommonState::process_alert`.
         self.state = if let AlertLevel::Unknown(_) = alert.level {
+            // Reject unknown alert levels.
             ConnectionState::emit_alert(
                 AlertDescription::IllegalParameter,
                 Error::AlertReceived(alert.description),
             )
         } else if alert.description == AlertDescription::CloseNotify {
+            // Set the connection state to closed if we receive a close notify alert.
             ConnectionState::ConnectionClosed
         } else if alert.level == AlertLevel::Warning {
+            // Set the connection state to `next_state` if the alert is a warning.
             std::println!("TLS alert warning received: {:#?}", alert);
-            curr_state
+            next_state
         } else {
+            // Otherwise, the alert is fatal and we return an error.
             return Err(Error::AlertReceived(alert.description));
         };
 
