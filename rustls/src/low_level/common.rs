@@ -18,74 +18,14 @@ use crate::{
         handshake::HandshakeMessagePayload,
         message::{Message, MessagePayload},
     },
-    Error, ProtocolVersion,
+    Error,
 };
 use crate::{AlertDescription, ContentType, InvalidMessage};
 
-/// Represents the state of `LlConnectionCommon`.
-pub(crate) enum ConnectionState {
-    /// A poisoned state that is only produced inside [`LlConnectionCommon::process_tls_records`]
-    /// as a placeholder to compute the new state without having borrowing issues.
-    Taken,
-    /// The connection is expecting a specific kind of [`Message`].
-    Expect(Box<dyn ExpectState>),
-    /// The connection needs to emit an already generated [`Message`].
-    Emit(Box<dyn EmitState>),
-    /// The state that the connection will have after [`MustEncodeTlsData::done`] is called.
-    AfterEncode(Box<Self>),
-    /// The handshake has been successful.
-    HandshakeDone,
-    /// A fatal error happened and the connection cannot continue. Calling
-    /// [`LlConnectionCommon::process_tls_records`] will return the error contained in this state.
-    FatalError(Error),
-    /// The connection is closed
-    ConnectionClosed,
-}
-
-impl ConnectionState {
-    pub(crate) fn expect(state: impl ExpectState) -> Self {
-        Self::Expect(Box::new(state))
-    }
-
-    pub(crate) fn emit(state: impl EmitState) -> Self {
-        Self::Emit(Box::new(state))
-    }
-
-    pub(crate) fn emit_alert(description: AlertDescription, err: impl Into<Error>) -> Self {
-        Self::emit(EmitAlert {
-            description,
-            error: err.into(),
-        })
-    }
-}
-
-/// A connection state that is expecting for a specific kind of [`Message`]
-pub(crate) trait ExpectState: 'static {
-    /// Process an incomming message and return the next connection state if the message has the
-    /// right kind.
-    fn process_message(
-        self: Box<Self>,
-        _conn: &mut LlConnectionCommon,
-        msg: Message,
-    ) -> Result<ConnectionState, Error>;
-
-    /// Get the transcript contained on this state. This is used to call
-    /// [`HandshakeHash::add_message`] before calling [`ExpectState::process_message`] so we do not
-    /// forget to add it to the transcript by accident.
-    fn get_transcript_mut(&mut self) -> Option<&mut HandshakeHash> {
-        None
-    }
-}
-
-/// A connection state that will generate a [`Message`] that will be emitted during
-/// [`MustEncodeTlsData::encode`].
-pub(crate) trait EmitState: 'static {
-    /// Generate the message to be emitted. See [`GeneratedMessage`] for more information.
-    fn generate_message(
-        self: Box<Self>,
-        _conn: &mut LlConnectionCommon,
-    ) -> Result<GeneratedMessage, Error>;
-}
+use super::{
+    AppDataAvailable, AppDataRecord, EncodeError, InsufficientSizeError, MustEncodeTlsData,
+    MustTransmitTlsData, State, Status, TrafficTransit,
+};
 
 /// both `LlClientConnection` and `LlServerConnection` implement `DerefMut<Target = LlConnectionCommon>`
 pub struct LlConnectionCommon {
@@ -261,59 +201,9 @@ impl LlConnectionCommon {
         }
     }
 
-    /// Generate a new status to be returned by [`Self::process_tls_records`].
-    ///
-    /// This method sets the `discard` field of the status to `offset`.
-    fn gen_status<'c, 'i>(
-        &'c mut self,
-        f: impl FnOnce(&'c mut Self) -> State<'c, 'i>,
-    ) -> Result<Status<'c, 'i>, Error> {
-        Ok(Status {
-            discard: core::mem::take(&mut self.offset),
-            state: f(self),
-        })
-    }
-
-    /// Return the total number of bytes required to write all the fragments of `msg` if it were to be
-    /// fragmented and possibly encrypted.
-    fn fragments_len(&self, msg: &PlainMessage, needs_encryption: bool) -> usize {
-        // This is the payload length of the fragments that would use the maximum fragment size
-        // provided by the fragmenter, called complete fragments from now on.
-        let complete_fragment_len = self
-            .message_fragmenter
-            .get_max_fragment_size();
-        // This is the length of the message payload.
-        let payload_len = msg.payload.0.len();
-
-        // When fragmenting a message payload, we would have a certain number of complete fragments
-        // and a trailing fragment.
-
-        // This is the number of complete fragments
-        let num_complete_fragments = payload_len / complete_fragment_len;
-        // This is the payload length of the trailing fragmente
-        let trailing_fragment_len = payload_len % complete_fragment_len;
-
-        if needs_encryption {
-            // This is the length of the complete fragments after being encrypted.
-            let complete_encrypted_fragment_len = self
-                .record_layer
-                .encrypted_len(complete_fragment_len);
-            // This is the length of the trailing fragment after being encrypted.
-            let trailing_encrypted_fragment_len = self
-                .record_layer
-                .encrypted_len(trailing_fragment_len);
-
-            num_complete_fragments * complete_encrypted_fragment_len
-                + trailing_encrypted_fragment_len
-        } else {
-            num_complete_fragments * OpaqueMessage::encoded_len(complete_fragment_len)
-                + OpaqueMessage::encoded_len(trailing_fragment_len)
-        }
-    }
-
     /// Encode `plain_msg` into `outgoing_tls`. Returns the number of written bytes when
     /// successful.
-    fn encode_plain_msg(
+    pub(super) fn encode_plain_msg(
         &mut self,
         plain_msg: &PlainMessage,
         needs_encryption: bool,
@@ -388,99 +278,50 @@ impl LlConnectionCommon {
 
         Ok(msg)
     }
-}
 
-/// Handle an incoming alert and compute the next connection state.
-///
-///
-/// This function returns `next_state` if the alert received doesn't require any change of state to
-/// be handled.
-fn handle_alert(alert: AlertMessagePayload, next_state: ConnectionState) -> ConnectionState {
-    // This code is based on `CommonState::process_alert`.
-    if let AlertLevel::Unknown(_) = alert.level {
-        // Reject unknown alert levels.
-        ConnectionState::emit_alert(
-            AlertDescription::IllegalParameter,
-            Error::AlertReceived(alert.description),
-        )
-    } else if alert.description == AlertDescription::CloseNotify {
-        // Set the connection state to closed if we receive a close notify alert.
-        ConnectionState::ConnectionClosed
-    } else if alert.level == AlertLevel::Warning {
-        // Set the connection state to `next_state` if the alert is a warning.
-        std::println!("TLS alert warning received: {:#?}", alert);
-        next_state
-    } else {
-        // Otherwise, the alert is fatal and we shouldn't continue the connection.
-        ConnectionState::FatalError(Error::AlertReceived(alert.description))
+    pub(super) fn encode_tls_data(
+        &mut self,
+        outgoing_tls: &mut [u8],
+        generated_message: &mut GeneratedMessage,
+    ) -> Result<usize, EncodeError> {
+        let GeneratedMessage {
+            plain_msg,
+            needs_encryption,
+            after_encode,
+        } = generated_message;
+
+        let Some(taken_after_encode) = after_encode.take() else {
+            return Err(EncodeError::AlreadyEncoded);
+        };
+
+        let encode_result = self.encode_plain_msg(plain_msg, *needs_encryption, outgoing_tls);
+
+        match encode_result {
+            Ok(written_bytes) => {
+                self.state = ConnectionState::AfterEncode(Box::new(taken_after_encode));
+                Ok(written_bytes)
+            }
+            Err(err) => {
+                // Restore the state on failure.
+                *after_encode = Some(taken_after_encode);
+
+                Err(EncodeError::InsufficientSize(err))
+            }
+        }
     }
-}
 
-/// FIXME: docs
-#[must_use]
-pub struct Status<'c, 'i> {
-    /// number of bytes that must be discarded from the *front* of `incoming_tls` *after* handling
-    /// `state` and *before* the next `process_tls_records` call
-    pub discard: usize,
+    pub(super) fn transmit_tls_data_done(&mut self, next_state: ConnectionState) {
+        self.state = next_state;
+    }
 
-    /// the current state of the handshake process
-    pub state: State<'c, 'i>,
-}
-
-/// FIXME: docs
-pub enum State<'c, 'i> {
-    /// One, or more, application data record is available
-    AppDataAvailable(AppDataAvailable<'c, 'i>),
-
-    /// A Handshake record must be encoded into the `outgoing_tls` buffer
-    MustEncodeTlsData(MustEncodeTlsData<'c>),
-
-    /// TLS records related to the handshake have been placed in the `outgoing_tls` buffer and must
-    /// be transmitted to continue with the handshake process
-    MustTransmitTlsData(MustTransmitTlsData<'c>),
-
-    /// More TLS data needs to be added to the `incoming_tls` buffer to continue with the handshake
-    NeedsMoreTlsData {
-        /// number of bytes required to complete a TLS record. `None` indicates that
-        /// no information is available
-        num_bytes: Option<NonZeroUsize>,
-    },
-
-    /// Handshake is complete.
-    TrafficTransit(TrafficTransit<'c>),
-
-    /// Connection is being closed.
-    ConnectionClosed,
-    // .. other variants are omitted for now ..
-}
-
-/// A decrypted application data record
-#[derive(Debug)]
-pub struct AppDataRecord<'i> {
-    /// number of the bytes associated to this record that must discarded from the front of
-    /// the `incoming_tls` buffer before the next `process_tls_record` call
-    pub discard: NonZeroUsize,
-
-    /// FIXME: docs
-    pub payload: &'i [u8],
-}
-
-/// FIXME: docs
-pub struct AppDataAvailable<'c, 'i> {
-    /// FIXME: docs
-    conn: &'c mut LlConnectionCommon,
-    /// FIXME: docs
-    incoming_tls: Option<&'i mut [u8]>,
-}
-
-impl<'c, 'i> AppDataAvailable<'c, 'i> {
-    /// FIXME: docs
-    pub fn next_record<'a>(&'a mut self) -> Option<Result<AppDataRecord<'a>, Error>> {
-        let offset = self.conn.offset;
-        let incoming_tls = self.incoming_tls.as_deref_mut()?;
+    pub(super) fn next_app_data_record<'i>(
+        &mut self,
+        incoming_tls: &'i mut [u8],
+    ) -> Option<Result<AppDataRecord<'i>, Error>> {
+        let offset = self.offset;
 
         let msg = Ok(()).and_then(|()| {
-            let mut reader = Reader::init(&incoming_tls[self.conn.offset..]);
+            let mut reader = Reader::init(&incoming_tls[self.offset..]);
             let m = OpaqueMessage::read(&mut reader).map_err(|err| match err {
                 MessageError::TooShortForHeader | MessageError::TooShortForLength => {
                     InvalidMessage::MessageTooShort
@@ -491,10 +332,9 @@ impl<'c, 'i> AppDataAvailable<'c, 'i> {
                 MessageError::UnknownProtocolVersion => InvalidMessage::UnknownProtocolVersion,
             })?;
             if let ContentType::ApplicationData = m.typ {
-                self.conn.offset += reader.used();
+                self.offset += reader.used();
 
                 let decrypted = self
-                    .conn
                     .record_layer
                     .decrypt_incoming(m)?
                     .expect("we don't support early data yet");
@@ -514,7 +354,7 @@ impl<'c, 'i> AppDataAvailable<'c, 'i> {
                 slice.copy_from_slice(&payload);
 
                 Ok(Some(AppDataRecord {
-                    discard: self.conn.offset.try_into().unwrap(),
+                    discard: self.offset.try_into().unwrap(),
                     payload: slice,
                 }))
             } else {
@@ -524,14 +364,12 @@ impl<'c, 'i> AppDataAvailable<'c, 'i> {
 
         msg.transpose()
     }
-}
 
-impl<'c, 'i> AppDataAvailable<'c, 'i> {
-    /// returns the payload size of the next app-data record *without* decrypting it
-    ///
-    /// returns `None` if there are no more app-data records
-    pub fn peek_len(&self) -> Option<NonZeroUsize> {
-        let mut reader = Reader::init(&self.incoming_tls.as_deref()?[self.conn.offset..]);
+    pub(super) fn peek_app_data_record_len<'i>(
+        &self,
+        incoming_tls: &'i [u8],
+    ) -> Option<NonZeroUsize> {
+        let mut reader = Reader::init(&incoming_tls[self.offset..]);
 
         match OpaqueMessage::read(&mut reader) {
             Ok(OpaqueMessage {
@@ -541,121 +379,121 @@ impl<'c, 'i> AppDataAvailable<'c, 'i> {
             _ => None,
         }
     }
-}
 
-/// Provided buffer was too small
-#[derive(Debug)]
-pub struct InsufficientSizeError {
-    /// buffer must be at least this size
-    pub required_size: usize,
-}
+    /// Generate a new status to be returned by [`Self::process_tls_records`].
+    ///
+    /// This method sets the `discard` field of the status to `offset`.
+    fn gen_status<'c, 'i>(
+        &'c mut self,
+        f: impl FnOnce(&'c mut Self) -> State<'c, 'i>,
+    ) -> Result<Status<'c, 'i>, Error> {
+        Ok(Status {
+            discard: core::mem::take(&mut self.offset),
+            state: f(self),
+        })
+    }
 
-/// FIXME: docs
-pub struct MustEncodeTlsData<'c> {
-    /// FIXME: docs
-    conn: &'c mut LlConnectionCommon,
-    generated_message: GeneratedMessage,
-}
+    /// Return the total number of bytes required to write all the fragments of `msg` if it were to be
+    /// fragmented and possibly encrypted.
+    fn fragments_len(&self, msg: &PlainMessage, needs_encryption: bool) -> usize {
+        // This is the payload length of the fragments that would use the maximum fragment size
+        // provided by the fragmenter, called complete fragments from now on.
+        let complete_fragment_len = self
+            .message_fragmenter
+            .get_max_fragment_size();
+        // This is the length of the message payload.
+        let payload_len = msg.payload.0.len();
 
-/// An error occurred while encrypting a handshake record
-#[derive(Debug)]
-pub enum EncodeError {
-    /// Provided buffer was too small
-    InsufficientSize(InsufficientSizeError),
+        // When fragmenting a message payload, we would have a certain number of complete fragments
+        // and a trailing fragment.
 
-    /// The handshake record has already been encoded; do not call `encode` again
-    AlreadyEncoded,
-}
+        // This is the number of complete fragments
+        let num_complete_fragments = payload_len / complete_fragment_len;
+        // This is the payload length of the trailing fragmente
+        let trailing_fragment_len = payload_len % complete_fragment_len;
 
-impl core::fmt::Display for EncodeError {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            EncodeError::InsufficientSize(InsufficientSizeError { required_size }) => write!(
-                f,
-                "cannot encode due to insufficient size, {} bytes are required",
-                required_size
-            ),
-            EncodeError::AlreadyEncoded => "cannot encode, data has already been encoded".fmt(f),
+        if needs_encryption {
+            // This is the length of the complete fragments after being encrypted.
+            let complete_encrypted_fragment_len = self
+                .record_layer
+                .encrypted_len(complete_fragment_len);
+            // This is the length of the trailing fragment after being encrypted.
+            let trailing_encrypted_fragment_len = self
+                .record_layer
+                .encrypted_len(trailing_fragment_len);
+
+            num_complete_fragments * complete_encrypted_fragment_len
+                + trailing_encrypted_fragment_len
+        } else {
+            num_complete_fragments * OpaqueMessage::encoded_len(complete_fragment_len)
+                + OpaqueMessage::encoded_len(trailing_fragment_len)
         }
     }
 }
 
-impl std::error::Error for EncodeError {}
+/// Represents the state of `LlConnectionCommon`.
+pub(crate) enum ConnectionState {
+    /// A poisoned state that is only produced inside [`LlConnectionCommon::process_tls_records`]
+    /// as a placeholder to compute the new state without having borrowing issues.
+    Taken,
+    /// The connection is expecting a specific kind of [`Message`].
+    Expect(Box<dyn ExpectState>),
+    /// The connection needs to emit an already generated [`Message`].
+    Emit(Box<dyn EmitState>),
+    /// The state that the connection will have after [`MustEncodeTlsData::done`] is called.
+    AfterEncode(Box<Self>),
+    /// The handshake has been successful.
+    HandshakeDone,
+    /// A fatal error happened and the connection cannot continue. Calling
+    /// [`LlConnectionCommon::process_tls_records`] will return the error contained in this state.
+    FatalError(Error),
+    /// The connection is closed
+    ConnectionClosed,
+}
 
-impl<'c> MustEncodeTlsData<'c> {
-    /// Encodes a handshake record into the `outgoing_tls` buffer
-    ///
-    /// returns the number of bytes that were written into `outgoing_tls`, or an error if
-    /// the provided buffer was too small. in the error case, `outgoing_tls` is not modified
-    pub fn encode(&mut self, outgoing_tls: &mut [u8]) -> Result<usize, EncodeError> {
-        let GeneratedMessage {
-            ref plain_msg,
-            needs_encryption,
-            ref mut after_encode,
-        } = self.generated_message;
+impl ConnectionState {
+    pub(crate) fn expect(state: impl ExpectState) -> Self {
+        Self::Expect(Box::new(state))
+    }
 
-        let Some(taken_after_encode) = after_encode.take() else {
-            return Err(EncodeError::AlreadyEncoded);
-        };
+    pub(crate) fn emit(state: impl EmitState) -> Self {
+        Self::Emit(Box::new(state))
+    }
 
-        let encode_result = self
-            .conn
-            .encode_plain_msg(plain_msg, needs_encryption, outgoing_tls);
-
-        match encode_result {
-            Ok(written_bytes) => {
-                self.conn.state = ConnectionState::AfterEncode(Box::new(taken_after_encode));
-                Ok(written_bytes)
-            }
-            Err(err) => {
-                // Restore the state on failure.
-                *after_encode = Some(taken_after_encode);
-
-                Err(EncodeError::InsufficientSize(err))
-            }
-        }
+    pub(crate) fn emit_alert(description: AlertDescription, err: impl Into<Error>) -> Self {
+        Self::emit(EmitAlert {
+            description,
+            error: err.into(),
+        })
     }
 }
 
-/// FIXME: docs
-pub struct MustTransmitTlsData<'c> {
-    /// FIXME: docs
-    conn: &'c mut LlConnectionCommon,
-    /// FIXME: docs
-    next_state: ConnectionState,
-}
+/// A connection state that is expecting for a specific kind of [`Message`]
+pub(crate) trait ExpectState: 'static {
+    /// Process an incomming message and return the next connection state if the message has the
+    /// right kind.
+    fn process_message(
+        self: Box<Self>,
+        _conn: &mut LlConnectionCommon,
+        msg: Message,
+    ) -> Result<ConnectionState, Error>;
 
-impl<'c> MustTransmitTlsData<'c> {
-    /// FIXME: docs
-    pub fn done(self) {
-        self.conn.state = self.next_state;
+    /// Get the transcript contained on this state. This is used to call
+    /// [`HandshakeHash::add_message`] before calling [`ExpectState::process_message`] so we do not
+    /// forget to add it to the transcript by accident.
+    fn get_transcript_mut(&mut self) -> Option<&mut HandshakeHash> {
+        None
     }
 }
 
-/// FIXME: docs
-pub struct TrafficTransit<'c> {
-    /// FIXME: docs
-    conn: &'c mut LlConnectionCommon,
-}
-
-impl<'c> TrafficTransit<'c> {
-    /// Encrypts `application_data` into the `outgoing_tls` buffer
-    ///
-    /// returns the number of bytes that were written into `outgoing_tls`, or an error if
-    /// the provided buffer was too small. in the error case, `outgoing_tls` is not modified
-    pub fn encrypt(
-        &mut self,
-        application_data: &[u8],
-        outgoing_tls: &mut [u8],
-    ) -> Result<usize, InsufficientSizeError> {
-        let msg = PlainMessage::from(Message {
-            version: ProtocolVersion::TLSv1_2,
-            payload: MessagePayload::ApplicationData(Payload(application_data.to_vec())),
-        });
-
-        self.conn
-            .encode_plain_msg(&msg, true, outgoing_tls)
-    }
+/// A connection state that will generate a [`Message`] that will be emitted during
+/// [`MustEncodeTlsData::encode`].
+pub(crate) trait EmitState: 'static {
+    /// Generate the message to be emitted. See [`GeneratedMessage`] for more information.
+    fn generate_message(
+        self: Box<Self>,
+        _conn: &mut LlConnectionCommon,
+    ) -> Result<GeneratedMessage, Error>;
 }
 
 struct EmitAlert {
@@ -695,6 +533,32 @@ impl GeneratedMessage {
     pub(crate) fn require_encryption(mut self, needs_encryption: bool) -> Self {
         self.needs_encryption = needs_encryption;
         self
+    }
+}
+
+/// Handle an incoming alert and compute the next connection state.
+///
+///
+/// This function returns `next_state` if the alert received doesn't require any change of state to
+/// be handled.
+fn handle_alert(alert: AlertMessagePayload, next_state: ConnectionState) -> ConnectionState {
+    // This code is based on `CommonState::process_alert`.
+    if let AlertLevel::Unknown(_) = alert.level {
+        // Reject unknown alert levels.
+        ConnectionState::emit_alert(
+            AlertDescription::IllegalParameter,
+            Error::AlertReceived(alert.description),
+        )
+    } else if alert.description == AlertDescription::CloseNotify {
+        // Set the connection state to closed if we receive a close notify alert.
+        ConnectionState::ConnectionClosed
+    } else if alert.level == AlertLevel::Warning {
+        // Set the connection state to `next_state` if the alert is a warning.
+        std::println!("TLS alert warning received: {:#?}", alert);
+        next_state
+    } else {
+        // Otherwise, the alert is fatal and we shouldn't continue the connection.
+        ConnectionState::FatalError(Error::AlertReceived(alert.description))
     }
 }
 

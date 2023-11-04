@@ -11,7 +11,7 @@ use crate::check::{inappropriate_handshake_message, inappropriate_message};
 use crate::conn::ConnectionRandoms;
 use crate::crypto::ActiveKeyExchange;
 use crate::hash_hs::{HandshakeHash, HandshakeHashBuffer};
-use crate::low_level::{
+use crate::low_level::common::{
     ConnectionState, EmitState, ExpectState, GeneratedMessage, LlConnectionCommon,
 };
 use crate::msgs::base::{Payload, PayloadU8};

@@ -12,7 +12,7 @@ use crate::conn::ConnectionRandoms;
 use crate::crypto::SupportedKxGroup;
 use crate::dns_name::DnsName;
 use crate::hash_hs::{HandshakeHash, HandshakeHashBuffer};
-use crate::low_level::{EmitState, GeneratedMessage};
+use crate::low_level::common::{EmitState, GeneratedMessage};
 use crate::msgs::codec::Codec;
 use crate::msgs::enums::ECPointFormat;
 use crate::msgs::handshake::{
@@ -23,7 +23,7 @@ use crate::server::common::ActiveCertifiedKey;
 use crate::server::{hs, ClientHello};
 use crate::sign::CertifiedKey;
 use crate::{
-    low_level::{ConnectionState, ExpectState, LlConnectionCommon},
+    low_level::common::{ConnectionState, ExpectState, LlConnectionCommon},
     msgs::{
         enums::Compression,
         handshake::{ConvertServerNameList, HandshakePayload},
