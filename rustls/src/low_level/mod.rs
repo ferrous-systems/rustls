@@ -2,16 +2,17 @@
 
 pub(crate) mod common;
 
+pub use self::common::LlConnectionCommon;
+
 use core::num::NonZeroUsize;
 
+use self::common::{ConnectionState, GeneratedMessage};
 use crate::crypto::cipher::PlainMessage;
 use crate::msgs::base::Payload;
 use crate::{
     msgs::message::{Message, MessagePayload},
     Error, ProtocolVersion,
 };
-
-use self::common::{ConnectionState, GeneratedMessage, LlConnectionCommon};
 
 /// FIXME: docs
 #[must_use]
